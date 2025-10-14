@@ -12,8 +12,8 @@ sv_help = (
     '朱茵 1 101\n'
     '盖儿 1 84\n'
     '（没输入速度的为敌方，101表示到达终点）\n'
-    '[超车] 计算角色A超车角色B的概率，示例：\n'
-    '超车 245 240'
+    '[乱速] 计算两个角色乱速的概率，示例：\n'
+    '乱速 245 240'
 ).strip()
 
 sv = Service(name=sv_name, use_priv=priv.NORMAL, manage_priv=priv.ADMIN,
@@ -85,18 +85,19 @@ async def speed_test(bot, ev: CQEvent):
     except Exception as e:
         await bot.send(ev, f'计算错误，请检查输入数值是否正确', at_sender=True)
 
-#@sv.on_rex(r'^超车\s*(\d+)\s+(\d+)$')
-@sv.on_rex(r'^超车\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$')
+#@sv.on_rex(r'^乱速\s*(\d+)\s+(\d+)$')
+@sv.on_rex(r'^乱速\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$')
 async def overtake(bot, ev: CQEvent):
     # Match input numbers
     match = ev['match']
-    v1 = float(match.group(1))
-    v2 = float(match.group(2))
+    #v1 = float(match.group(1))
+    #v2 = float(match.group(2))
+    v1, v2 = sorted((float(match.group(1)), float(match.group(2))))
     try:
         # Calculate the overtaking probability
         prob = overtake_prob(v1, v2)
-        percent = round(prob * 100, 1)
+        percent = round(prob * 100, 2)
         await bot.send(ev,
-            f'\n角色A超车角色B的概率为{percent}%', at_sender=True)
+            f'\n两个角色乱速的概率为{percent}%', at_sender=True)
     except Exception as e:
         await bot.send(ev, f'计算错误，请检查输入数值是否正确', at_sender=True)
