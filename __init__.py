@@ -98,6 +98,6 @@ async def overtake(bot, ev: CQEvent):
         prob = overtake_prob(v1, v2)
         percent = round(prob * 100, 2)
         await bot.send(ev,
-            f'\n两个角色乱速的概率为{percent}%', at_sender=True)
+            f'\n乱速的概率为：{percent}%', at_sender=True)
     except Exception as e:
         await bot.send(ev, f'计算错误，请检查输入数值是否正确', at_sender=True)
