@@ -74,7 +74,7 @@ async def speed_test(bot, ev: CQEvent):
                                         N_sample=int(1e6))
         lines = []
         for (enemy, enemy_min, enemy_max, mean, med, ally_min) in ret:
-            enemy = enmey[0]
+            enemy = enemy[0]
             lines.append(
                 f'\n- {enemy}：速度区间[{enemy_min:.1f}, {enemy_max:.1f}]，'
                 f'MC均值{mean:.1f}，中位数{med:.1f}，稳定超车速度{ally_min:.1f}'
