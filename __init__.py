@@ -19,7 +19,25 @@ sv_help = (
 sv = Service(name=sv_name, use_priv=priv.NORMAL, manage_priv=priv.ADMIN,
              visible=True, enable_on_default=True, bundle='娱乐', help_=sv_help)
 
-def _parse_tokens(text: str):
+
+#@sv.on_rex(r'^乱速\s*(\d+)\s+(\d+)$')
+@sv.on_rex(r'^乱速\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$')
+async def overtake(bot, ev: CQEvent):
+    # Match input numbers
+    match = ev['match']
+    #v1 = float(match.group(1))
+    #v2 = float(match.group(2))
+    v1, v2 = sorted((float(match.group(1)), float(match.group(2))))
+    try:
+        # Calculate the overtaking probability
+        prob = overtake_prob(v1, v2)
+        percent = round(prob * 100, 2)
+        await bot.send(ev,
+            f'\n乱速的概率为：{percent}%', at_sender=True)
+    except Exception as e:
+        await bot.send(ev, f'计算错误，请检查输入数值是否正确', at_sender=True)
+
+def _parse_tokens_test(text: str):
     # Initialization
     tokens = text.strip().split()
     allies, enemies, character = [], [], []
@@ -65,7 +83,7 @@ async def speed_test(bot, ev: CQEvent):
         await bot.finish(ev, '\n' + sv_help, at_sender=True)
     # Parse the input tokens
     try:
-        allies, enemies = _parse_tokens(raw)
+        allies, enemies = _parse_tokens_test(raw)
     except Exception as e:
         await bot.finish(ev, 
             f'输入错误，请检查输入，或发团战测速查看详细用法', at_sender=True)
@@ -82,22 +100,5 @@ async def speed_test(bot, ev: CQEvent):
             )
         msg = ''.join(lines)
         await bot.send(ev, msg, at_sender=True)
-    except Exception as e:
-        await bot.send(ev, f'计算错误，请检查输入数值是否正确', at_sender=True)
-
-#@sv.on_rex(r'^乱速\s*(\d+)\s+(\d+)$')
-@sv.on_rex(r'^乱速\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$')
-async def overtake(bot, ev: CQEvent):
-    # Match input numbers
-    match = ev['match']
-    #v1 = float(match.group(1))
-    #v2 = float(match.group(2))
-    v1, v2 = sorted((float(match.group(1)), float(match.group(2))))
-    try:
-        # Calculate the overtaking probability
-        prob = overtake_prob(v1, v2)
-        percent = round(prob * 100, 2)
-        await bot.send(ev,
-            f'\n乱速的概率为：{percent}%', at_sender=True)
     except Exception as e:
         await bot.send(ev, f'计算错误，请检查输入数值是否正确', at_sender=True)
