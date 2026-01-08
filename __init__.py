@@ -93,25 +93,26 @@ def _parse_tokens_summary(text: str):
     allies, enemies, notes = [], [], {}
     i = 1
     while i < len(tokens):
-        # name g1 g2
-        if i + 2 >= len(tokens) or is_int(tokens[i]) \
-            or (not is_int(tokens[i + 1])) or (not is_int(tokens[i + 2])):
+    while i < len(tokens):
+        # (name, g1, g2)
+        if i + 2 >= len(tokens) or is_int(tokens[i]) or (not is_int(tokens[i+1])) or (not is_int(tokens[i+2])):
             i += 1
             continue
         name = tokens[i]
         g1 = int(tokens[i + 1])
         g2 = int(tokens[i + 2])
         i += 3
-        # Alley: The third input is speed
+        # Alley: (name, g1, g2, speed)
         if i < len(tokens) and is_int(tokens[i]):
             allies.append((name, g1, g2, int(tokens[i])))
             i += 1
             continue
-        # Enemy: No third input or a note is given
+        # Enemy: (name, g1, g2, note or "")
         note = ""
         if i < len(tokens) and not is_int(tokens[i]):
-            note = tokens[i]
-            i += 1
+            if not (i + 2 < len(tokens) and is_int(tokens[i + 1]) and is_int(tokens[i + 2])):
+                note = tokens[i]
+                i += 1
         enemies.append((name, g1, g2, note))
     # Change the action gauge to 100 if not a single >100 value is specified
     end_gauge = [x[2] for x in allies + enemies]
