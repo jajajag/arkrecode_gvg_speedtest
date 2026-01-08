@@ -119,7 +119,7 @@ def _parse_tokens_summary(text: str):
             for idx, item in enumerate(lst):
                 if item[2] == 100:
                     lst[idx] = item[:2] + (101,) + item[3:]
-    return title, allies, enemies, notes
+    return title, allies, enemies
 
 @sv.on_prefix('团战总结')
 async def speed_summary(bot, ev: CQEvent):
