@@ -68,7 +68,7 @@ def compute_speed(
         # Compute ally's minimum speed to act before this enemy
         ally_min_speed = enemy_max_speed / 0.95
         
-        enemy_info.append((enemies[i][0], enemy_min_speed, enemy_max_speed,
+        enemy_info.append((enemies[i], enemy_min_speed, enemy_max_speed,
                            mean, med, ally_min_speed))
 
     return enemy_info
