@@ -93,7 +93,6 @@ def _parse_tokens_summary(text: str):
     allies, enemies, notes = [], [], {}
     i = 1
     while i < len(tokens):
-    while i < len(tokens):
         # (name, g1, g2)
         if i + 2 >= len(tokens) or is_int(tokens[i]) or (not is_int(tokens[i+1])) or (not is_int(tokens[i+2])):
             i += 1
