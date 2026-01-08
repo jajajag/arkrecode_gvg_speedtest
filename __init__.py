@@ -13,6 +13,8 @@ sv_help = (
     '朱茵 1 101\n'
     '盖儿 1 84\n'
     '（没输入速度的为敌方，101表示到达终点）\n'
+    '[团战总结] 直接输出团战总结，示例：\n'
+    '团战测速 上路上半 水马 1 56 135 水琴 1 70 170 水拳 4 58 131 朱茵 1 101 专武1.3w 盖儿 1 84 闪避羁绊\n'
     '[乱速] 计算两个角色乱速的概率，示例：\n'
     '乱速 245 240'
 ).strip()
@@ -122,6 +124,7 @@ def _parse_tokens_summary(text: str):
                     lst[idx] = item[:2] + (101,) + item[3:]
     return title, allies, enemies
 
+# 示例：团战总结 上路上半 水马 1 56 135 水琴 1 70 170 水拳 4 58 131 朱茵 1 101 专武1.3w 盖儿 1 84 闪避羁绊
 @sv.on_prefix('团战总结')
 async def speed_summary(bot, ev: CQEvent):
     raw = ev.message.extract_plain_text()
