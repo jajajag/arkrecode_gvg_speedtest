@@ -93,12 +93,13 @@ def _parse_tokens_summary(text: str):
     i = 1
     while i < len(tokens):
         # name g1 g2
-        if i + 2 >= len(tokens) or is_int(tokens[i]) or (not is_int(tokens[i+1])) or (not is_int(tokens[i+2])):
+        if i + 2 >= len(tokens) or is_int(tokens[i]) \
+            or (not is_int(tokens[i + 1])) or (not is_int(tokens[i + 2])):
             i += 1
             continue
         name = tokens[i]
-        g1 = int(tokens[i+1])
-        g2 = int(tokens[i+2])
+        g1 = int(tokens[i + 1])
+        g2 = int(tokens[i + 2])
         i += 3
         # Alley: The third input is speed
         if i < len(tokens) and is_int(tokens[i]):
@@ -106,13 +107,11 @@ def _parse_tokens_summary(text: str):
             i += 1
             continue
         # Enemy: No third input or a note is given
-        enemy = (name, g1, g2)
-        enemies.append(enemy)
-        if i < len(tokens):
-            # Checking if it is a note
-            if not is_int(tokens[i]):
-                notes[enemy] = tokens[i]
-                i += 1
+        note = ""
+        if i < len(tokens) and not is_int(tokens[i]):
+            note = tokens[i]
+            i += 1
+        enemies.append((name, g1, g2, note))
     # Change the action gauge to 100 if not a single >100 value is specified
     end_gauge = [x[2] for x in allies + enemies]
     if not any(v > 100 for v in end_gauge) and end_gauge.count(100) == 1:
@@ -137,13 +136,7 @@ async def speed_summary(bot, ev: CQEvent):
                                         N_sample=int(1e6))
         lines = []
         for (enemy, enemy_min, enemy_max, mean, med, ally_min) in ret:
-            # Check if the enemy has a note
-            if isinstance(enemy, tuple):
-                enemy_name = str(enemy[0])
-                note = enemy_notes.get(enemy, "")
-            else:
-                enemy_name = str(enemy)
-                note = ""
+            enemy_name, note = enemy[0], enemy[3]
             lines.append(f"{enemy_name}[{enemy_min:.1f},{enemy_max:.1f}]{note}")
         prefix = f"{title}：" if title else ""
         msg = prefix + "，".join(lines)
