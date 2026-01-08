@@ -127,7 +127,7 @@ async def speed_summary(bot, ev: CQEvent):
     if not raw.strip():
         await bot.finish(ev, '\n' + sv_help, at_sender=True)
     try:
-        title, allies, enemies, enemy_notes = _parse_tokens_summary(raw)
+        title, allies, enemies = _parse_tokens_summary(raw)
     except Exception:
         await bot.finish(ev, 
             f'输入错误，请检查输入，或发团战测速查看详细用法', at_sender=True)
