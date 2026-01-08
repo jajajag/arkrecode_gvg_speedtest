@@ -147,7 +147,7 @@ async def speed_summary(bot, ev: CQEvent):
             lines.append(f"{enemy_name}[{enemy_min:.1f},{enemy_max:.1f}]{note}")
         prefix = f"{title}：" if title else ""
         msg = prefix + "，".join(lines)
-        await bot.send(ev, msg, at_sender=True)
+        await bot.send(ev, msg, at_sender=False)
     except Exception:
         await bot.send(ev, "计算错误：请检查输入数值是否正确", at_sender=True)
 
