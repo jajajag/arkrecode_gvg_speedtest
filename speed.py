@@ -65,11 +65,15 @@ def compute_speed(
         # Compute mean and median speeds
         mean = np.mean(enemy_speed_cat)
         med = np.median(enemy_speed_cat)
+        # Most likely integer speed (mode of rounded samples)
+        spd_int = np.rint(enemy_speed_cat).astype(np.int64)  # round to nearest int
+        lo = spd_int.min()
+        mode_int = (np.bincount(spd_int - lo).argmax() + lo)
         # Compute ally's minimum speed to act before this enemy
         ally_min_speed = enemy_max_speed / 0.95
         
         enemy_info.append((enemies[i], enemy_min_speed, enemy_max_speed,
-                           mean, med, ally_min_speed))
+                           mean, med, mode_int, ally_min_speed))
 
     return enemy_info
 
