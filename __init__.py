@@ -75,11 +75,12 @@ async def speed_test(bot, ev: CQEvent):
         ret = await compute_speed_async(allies=allies, enemies=enemies, 
                                         N_sample=int(1e6))
         lines = []
-        for (enemy, enemy_min, enemy_max, mean, med, ally_min) in ret:
+        for (enemy, enemy_min, enemy_max, mean, med, mode_int, ally_min) in ret:
             enemy = enemy[0]
             lines.append(
                 f'\n- {enemy}：速度区间[{enemy_min:.1f}, {enemy_max:.1f}]，'
-                f'MC均值{mean:.1f}，中位数{med:.1f}，稳定超车速度{ally_min:.1f}'
+                f'MC均值{mean:.1f}，中位数{med:.1f}，最可能速度{mode_int:d}'
+                f'稳定超车速度{ally_min:.1f}'
             )
         msg = ''.join(lines)
         await bot.send(ev, msg, at_sender=True)
@@ -138,10 +139,12 @@ async def speed_summary(bot, ev: CQEvent):
     try:
         ret = await compute_speed_async(allies=allies, enemies=enemies,
                                         N_sample=int(1e6))
+        # Sort by mode_int (most possible speed)
+        ret = sorted(ret, key=lambda x: x[5], reverse=True)
         lines = []
-        for (enemy, enemy_min, enemy_max, mean, med, ally_min) in ret:
+        for (enemy, enemy_min, enemy_max, mean, med, mode_int, ally_min) in ret:
             enemy_name, note = enemy[0], enemy[3]
-            lines.append(f"{enemy_name}[{enemy_min:.1f},{enemy_max:.1f}]{note}")
+            lines.append(f"{enemy_name}{enemy_min:d}-{note}")
         prefix = f"{title}：" if title else ""
         msg = prefix + "，".join(lines)
         await bot.send(ev, msg, at_sender=False)
