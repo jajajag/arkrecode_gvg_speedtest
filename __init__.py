@@ -144,7 +144,7 @@ async def speed_summary(bot, ev: CQEvent):
         lines = []
         for (enemy, enemy_min, enemy_max, mean, med, mode_int, ally_min) in ret:
             enemy_name, note = enemy[0], enemy[3]
-            lines.append(f"{enemy_name}{enemy_min:d}-{note}")
+            lines.append(f"{enemy_name}{mode_int:d}-{note}")
         prefix = f"{title}：" if title else ""
         msg = prefix + "，".join(lines)
         await bot.send(ev, msg, at_sender=False)
