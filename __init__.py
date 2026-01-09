@@ -79,7 +79,7 @@ async def speed_test(bot, ev: CQEvent):
             enemy = enemy[0]
             lines.append(
                 f'\n- {enemy}：速度区间[{enemy_min:.1f}, {enemy_max:.1f}]，'
-                f'MC均值{mean:.1f}，中位数{med:.1f}，最可能速度{mode_int:d}'
+                f'MC均值{mean:.1f}，中位数{med:.1f}，最可能速度{mode_int:d}，'
                 f'稳定超车速度{ally_min:.1f}'
             )
         msg = ''.join(lines)
