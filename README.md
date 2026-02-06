@@ -47,6 +47,8 @@ python frame_buffer_ark.py
 
 ## 相关参考
 
+- [Ark Re:Code Wiki](https://arkrecodewiki.miraheze.org/wiki)
+
 - [异变的猫娘](https://space.bilibili.com/3546901544700020)的团战测速[教学视频](https://www.bilibili.com/video/BV1EcbRzGEz5)。
 
 - [HoshinoBot](https://github.com/Ice9Coffee/HoshinoBot)
