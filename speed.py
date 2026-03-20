@@ -67,7 +67,7 @@ def compute_speed(
         med = np.median(enemy_speed_cat)
         # Most likely integer speed (mode of rounded samples)
         spd_int = np.rint(enemy_speed_cat).astype(np.int64)
-        if not spd_int:
+        if spd_int.size == 0:
             # If the initial action gauge is fake, spd_int will be empty
             mode_int = np.nan
         else:
