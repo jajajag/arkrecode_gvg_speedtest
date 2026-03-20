@@ -66,9 +66,13 @@ def compute_speed(
         mean = np.mean(enemy_speed_cat)
         med = np.median(enemy_speed_cat)
         # Most likely integer speed (mode of rounded samples)
-        spd_int = np.rint(enemy_speed_cat).astype(np.int64)  # round to nearest int
-        lo = spd_int.min()
-        mode_int = (np.bincount(spd_int - lo).argmax() + lo)
+        spd_int = np.rint(enemy_speed_cat).astype(np.int64)
+        if not spd_int:
+            # If the initial action gauge is fake, spd_int will be empty
+            mode_int = np.nan
+        else:
+            lo = spd_int.min()
+            mode_int = (np.bincount(spd_int - lo).argmax() + lo)
         # Compute ally's minimum speed to act before this enemy
         ally_min_speed = enemy_max_speed / 0.95
         

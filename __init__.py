@@ -71,21 +71,18 @@ async def speed_test(bot, ev: CQEvent):
         await bot.finish(ev, 
             f'输入错误，请检查输入，或发团战测速查看详细用法', at_sender=True)
     # Compute the speeds of enemies
-    try:
-        ret = await compute_speed_async(allies=allies, enemies=enemies, 
-                                        N_sample=int(1e6))
-        lines = []
-        for (enemy, enemy_min, enemy_max, mean, med, mode_int, ally_min) in ret:
-            enemy = enemy[0]
-            lines.append(
-                f'\n- {enemy}：速度区间[{enemy_min:.1f}, {enemy_max:.1f}]，'
-                f'MC均值{mean:.1f}，中位数{med:.1f}，最可能速度{mode_int:d}，'
-                f'稳定超车速度{ally_min:.1f}'
-            )
-        msg = ''.join(lines)
-        await bot.send(ev, msg, at_sender=True)
-    except Exception as e:
-        await bot.send(ev, f'计算错误，请检查输入数值是否正确', at_sender=True)
+    ret = await compute_speed_async(allies=allies, enemies=enemies, 
+                                    N_sample=int(1e6))
+    lines = []
+    for (enemy, enemy_min, enemy_max, mean, med, mode_int, ally_min) in ret:
+        enemy = enemy[0]
+        lines.append(
+            f'\n- {enemy}：速度区间[{enemy_min:.1f}, {enemy_max:.1f}]，'
+            f'MC均值{mean:.1f}，中位数{med:.1f}，最可能速度{mode_int:d}，'
+            f'稳定超车速度{ally_min:.1f}'
+        )
+    msg = ''.join(lines)
+    await bot.send(ev, msg, at_sender=True)
 
 def _parse_tokens_summary(text: str):
     tokens = text.strip().split()
@@ -136,20 +133,17 @@ async def speed_summary(bot, ev: CQEvent):
     except Exception:
         await bot.finish(ev, 
             f'输入错误，请检查输入，或发团战测速查看详细用法', at_sender=True)
-    try:
-        ret = await compute_speed_async(allies=allies, enemies=enemies,
-                                        N_sample=int(1e6))
-        # Sort by mode_int (most possible speed)
-        ret = sorted(ret, key=lambda x: x[5], reverse=True)
-        lines = []
-        for (enemy, enemy_min, enemy_max, mean, med, mode_int, ally_min) in ret:
-            enemy_name, note = enemy[0], enemy[3]
-            lines.append(f"{enemy_name}{mode_int:d}{'-' + note if note else ''}")
-        prefix = f"{title}：" if title else ""
-        msg = prefix + "，".join(lines)
-        await bot.send(ev, msg, at_sender=False)
-    except Exception:
-        await bot.send(ev, "计算错误：请检查输入数值是否正确", at_sender=True)
+    ret = await compute_speed_async(allies=allies, enemies=enemies,
+                                    N_sample=int(1e6))
+    # Sort by mode_int (most possible speed)
+    ret = sorted(ret, key=lambda x: x[5], reverse=True)
+    lines = []
+    for (enemy, enemy_min, enemy_max, mean, med, mode_int, ally_min) in ret:
+        enemy_name, note = enemy[0], enemy[3]
+        lines.append(f"{enemy_name}{mode_int:d}{'-' + note if note else ''}")
+    prefix = f"{title}：" if title else ""
+    msg = prefix + "，".join(lines)
+    await bot.send(ev, msg, at_sender=False)
 
 #@sv.on_rex(r'^乱速\s*(\d+)\s+(\d+)$')
 @sv.on_rex(r'^乱速\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$')
