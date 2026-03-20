@@ -78,7 +78,7 @@ async def speed_test(bot, ev: CQEvent):
         enemy = enemy[0]
         lines.append(
             f'\n- {enemy}：速度区间[{enemy_min:.1f}, {enemy_max:.1f}]，'
-            f'MC均值{mean:.1f}，中位数{med:.1f}，最可能速度{mode_int:d}，'
+            f'MC均值{mean:.1f}，中位数{med:.1f}，最可能速度{mode_int:.0f}，'
             f'稳定超车速度{ally_min:.1f}'
         )
     msg = ''.join(lines)
@@ -140,7 +140,7 @@ async def speed_summary(bot, ev: CQEvent):
     lines = []
     for (enemy, enemy_min, enemy_max, mean, med, mode_int, ally_min) in ret:
         enemy_name, note = enemy[0], enemy[3]
-        lines.append(f"{enemy_name}{mode_int:d}{'-' + note if note else ''}")
+        lines.append(f"{enemy_name}{mode_int:.0f}{'-' + note if note else ''}")
     prefix = f"{title}：" if title else ""
     msg = prefix + "，".join(lines)
     await bot.send(ev, msg, at_sender=False)
