@@ -56,13 +56,10 @@
       font-weight: 800;
       margin-bottom: 10px;
     }
-    .speed-ref-title span { font-weight: 500; color: #60a5fa; margin-left: 10px; }
     .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-    .team-grid { display: grid; grid-template-columns: 3fr 2fr; gap: 20px; align-items: start; }
-    .op-row { display: grid; grid-template-columns: 2.5fr 1fr .7fr 3.2fr; gap: 8px; margin-bottom: 9px; }
-    .my-row { display: grid; grid-template-columns: 3fr 2fr; gap: 8px; margin-bottom: 9px; }
-    .header-op { display: grid; grid-template-columns: 2.5fr 1fr .7fr 3.2fr; gap: 8px; margin-bottom: 7px; }
-    .header-my { display: grid; grid-template-columns: 3fr 2fr; gap: 8px; margin-bottom: 7px; }
+    .team-grid { display: grid; grid-template-columns: 1fr; gap: 20px; align-items: start; }
+    .op-row { display: grid; grid-template-columns: 2.5fr 1fr .7fr 1.2fr; gap: 8px; margin-bottom: 9px; }
+    .header-op { display: grid; grid-template-columns: 2.5fr 1fr .7fr 1.2fr; gap: 8px; margin-bottom: 7px; }
     label, .mini-label { font-size: 14px; color: #64748b; }
     .side-title { font-weight: 800; font-size: 16px; }
     .red { color: #ef4444; }
@@ -79,17 +76,24 @@
     input:focus { border-color: #60a5fa; box-shadow: 0 0 0 2px rgba(96,165,250,.18); }
     .note { margin-top: 16px; }
     .note label { display: block; margin-bottom: 7px; color: #475569; }
-    .hint-wrap { position: relative; }
-    .speed-hint {
-      position: absolute;
-      right: 10px;
-      top: 50%;
-      transform: translateY(-50%);
-      font-size: 12px;
-      color: #6366f1;
-      pointer-events: none;
-      background: rgba(255,255,255,.85);
-      padding-left: 4px;
+    .speed-box {
+      min-height: 42px;
+      border: 1px solid #c7d2fe;
+      border-radius: 9px;
+      background: linear-gradient(180deg, #ffffff 0%, #eef2ff 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 10px;
+      color: #4338ca;
+      font-size: 17px;
+      font-weight: 900;
+      letter-spacing: .2px;
+      white-space: nowrap;
+    }
+    .speed-box:empty::before {
+      content: ' ';
+      visibility: hidden;
     }
     .actions { display: flex; gap: 8px; justify-content: space-between; align-items: center; margin-top: 12px; }
     .credit { font-size: 12px; color: #64748b; }
@@ -144,25 +148,14 @@
         font-size: 16px;
         white-space: nowrap;
       }
-      .speed-ref-title span {
-        margin-left: 6px;
-      }
-
-      /* 手机端：对手区域改成两列，顺序为：
-         对手 + 行动值 / 随机值 + 备注 */
+      /* 手机端：对手区域两列四格，顺序为：
+         对手 + 行动值 / 随机值 + 速度 */
       .team-grid {
         grid-template-columns: 1fr;
         gap: 18px;
       }
       .header-op,
       .op-row {
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-      }
-
-      /* 手机端：我方区域保持两列 */
-      .header-my,
-      .my-row {
         grid-template-columns: 1fr 1fr;
         gap: 8px;
       }
@@ -238,7 +231,7 @@
           </div>
 
           <div class="speed-ref">
-            <div class="speed-ref-title">我方速度参考 <span>（非必填）</span></div>
+            <div class="speed-ref-title">我方速度参考</div>
             <div class="grid-3">
               <div><label>我方速度</label><input type="number" data-field="refSpeed" placeholder="例: 241"></div>
               <div><label>初始行动值</label><input type="number" data-field="refInitial" placeholder="90"></div>
@@ -252,30 +245,14 @@
                 <span class="side-title red">对手</span>
                 <span class="mini-label">行动值</span>
                 <span class="mini-label">随机值</span>
-                <span class="mini-label">备注</span>
+                <span class="mini-label">速度</span>
               </div>
               ${[0,1,2].map(i => `
                 <div class="op-row" data-op="${i}">
                   <input data-field="opName" placeholder="对手${i+1}">
                   <input type="number" data-field="opInitial" placeholder="${OP_INITIAL_PLACEHOLDER[i]}">
                   <input type="number" data-field="opRandom" placeholder="0~5">
-                  <div class="hint-wrap">
-                    <input data-field="opNote" placeholder="免疫/高抗等">
-                    <span class="speed-hint"></span>
-                  </div>
-                </div>
-              `).join('')}
-            </div>
-
-            <div>
-              <div class="header-my">
-                <span class="side-title blue">我方</span>
-                <span class="mini-label">速度</span>
-              </div>
-              ${[0,1,2].map(i => `
-                <div class="my-row" data-my="${i}">
-                  <input data-field="myName" placeholder="我方${i+1}">
-                  <input type="number" data-field="mySpeed" placeholder="例: 241">
+                  <div class="speed-box" data-field="opSpeed"></div>
                 </div>
               `).join('')}
             </div>
@@ -335,7 +312,7 @@
           row.querySelector('[data-field="opInitial"]').value,
           row.querySelector('[data-field="opRandom"]').value
         );
-        row.querySelector('.speed-hint').textContent = text;
+        row.querySelector('[data-field="opSpeed"]').textContent = text;
       });
     }
 
@@ -370,18 +347,10 @@
 
         const ops = [...team.querySelectorAll('.op-row')].map(row => {
           const name = value(row, '[data-field="opName"]');
-          const hint = row.querySelector('.speed-hint').textContent;
-          const note = value(row, '[data-field="opNote"]');
-          return [name, hint, note].filter(Boolean).join(' ');
+          const speed = row.querySelector('[data-field="opSpeed"]').textContent;
+          return [name, speed].filter(Boolean).join(' ');
         }).filter(Boolean);
         if (ops.length) lines.push(`对手：${ops.join(' / ')}`);
-
-        const mys = [...team.querySelectorAll('.my-row')].map(row => {
-          const name = value(row, '[data-field="myName"]');
-          const speed = value(row, '[data-field="mySpeed"]');
-          return name ? (speed ? `${name}(${speed})` : name) : '';
-        }).filter(Boolean);
-        if (mys.length) lines.push(`我方：${mys.join(' / ')}`);
 
         const note = value(team, '[data-field="teamNote"]');
         if (note) lines.push(`备注：${note}`);
@@ -407,7 +376,7 @@
     document.getElementById('clearBtn').addEventListener('click', () => {
       if (!confirm('确定清空所有输入？')) return;
       document.querySelectorAll('input').forEach(i => i.value = '');
-      document.querySelectorAll('.speed-hint').forEach(s => s.textContent = '');
+      document.querySelectorAll('[data-field="opSpeed"]').forEach(s => s.textContent = '');
       document.querySelectorAll('.result-btn').forEach(b => b.classList.remove('active'));
       document.querySelectorAll('.team-section').forEach(t => t.classList.remove('team-win', 'team-lose'));
       const out = document.getElementById('output');
