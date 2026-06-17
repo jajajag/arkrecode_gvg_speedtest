@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>公会战双队记录</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 10px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f8fbff;
+      color: #1f2937;
+    }
+    .wrap { max-width: 1200px; margin: 0 auto; }
+    .team-section {
+      border: 1.5px solid #e5e7eb;
+      border-radius: 14px;
+      padding: 18px;
+      background: #fff;
+      margin-bottom: 14px;
+    }
+    .team-section.team-win { border-color: #86efac; background: #f0fdf4; }
+    .team-section.team-lose { border-color: #fca5a5; background: #fff5f5; }
+    .team-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 18px;
+    }
+    .team-title h2 { margin: 0; font-size: 18px; }
+    .result-toggle { display: flex; gap: 10px; }
+    .result-btn {
+      min-width: 80px;
+      padding: 9px 14px;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      border: 2px solid #e5e7eb;
+      background: #f9fafb;
+      color: #9ca3af;
+    }
+    .result-btn.win.active { background: #dcfce7; color: #166534; border-color: #86efac; }
+    .result-btn.lose.active { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
+    .speed-ref {
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 18px;
+    }
+    .speed-ref-title {
+      color: #2563eb;
+      font-weight: 800;
+      margin-bottom: 10px;
+    }
+    .speed-ref-title span { font-weight: 500; color: #60a5fa; margin-left: 10px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .team-grid { display: grid; grid-template-columns: 3fr 2fr; gap: 20px; align-items: start; }
+    .op-row { display: grid; grid-template-columns: 2.5fr 1fr .7fr 3.2fr; gap: 8px; margin-bottom: 9px; }
+    .my-row { display: grid; grid-template-columns: 3fr 2fr; gap: 8px; margin-bottom: 9px; }
+    .header-op { display: grid; grid-template-columns: 2.5fr 1fr .7fr 3.2fr; gap: 8px; margin-bottom: 7px; }
+    .header-my { display: grid; grid-template-columns: 3fr 2fr; gap: 8px; margin-bottom: 7px; }
+    label, .mini-label { font-size: 14px; color: #64748b; }
+    .side-title { font-weight: 800; font-size: 16px; }
+    .red { color: #ef4444; }
+    .blue { color: #2563eb; }
+    input {
+      width: 100%;
+      border: 1px solid #d7dee8;
+      border-radius: 7px;
+      padding: 10px 12px;
+      font-size: 16px;
+      outline: none;
+      background: #fff;
+    }
+    input:focus { border-color: #60a5fa; box-shadow: 0 0 0 2px rgba(96,165,250,.18); }
+    .note { margin-top: 16px; }
+    .note label { display: block; margin-bottom: 7px; color: #475569; }
+    .hint-wrap { position: relative; }
+    .speed-hint {
+      position: absolute;
+      right: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 12px;
+      color: #6366f1;
+      pointer-events: none;
+      background: rgba(255,255,255,.85);
+      padding-left: 4px;
+    }
+    .actions { display: flex; gap: 8px; justify-content: space-between; align-items: center; margin-top: 12px; }
+    .credit { font-size: 12px; color: #64748b; }
+    .credit a { color: #2563eb; text-decoration: none; }
+    .credit a:hover { text-decoration: underline; }
+    button.action {
+      border: 0;
+      border-radius: 8px;
+      padding: 9px 13px;
+      cursor: pointer;
+      background: #2563eb;
+      color: white;
+      font-weight: 700;
+    }
+    button.secondary { background: #e5e7eb; color: #374151; }
+    textarea {
+      width: 100%;
+      min-height: 130px;
+      margin-top: 10px;
+      display: none;
+      border: 1px solid #d7dee8;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 14px;
+      resize: vertical;
+      background: #fff;
+      color: #1f2937;
+    }
+    @media (max-width: 760px) {
+      body { padding: 6px; }
+      .wrap { max-width: 100%; }
+      .team-section {
+        padding: 14px;
+        border-radius: 12px;
+      }
+      .team-title { margin-bottom: 14px; }
+      .result-btn {
+        min-width: 64px;
+        padding: 8px 12px;
+      }
+
+      /* 手机端：速度参考保持一行三列 */
+      .grid-3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .speed-ref {
+        padding: 12px;
+        margin-bottom: 16px;
+      }
+      .speed-ref-title {
+        font-size: 16px;
+        white-space: nowrap;
+      }
+      .speed-ref-title span {
+        margin-left: 6px;
+      }
+
+      /* 手机端：对手区域改成两列，顺序为：
+         对手 + 行动值 / 随机值 + 备注 */
+      .team-grid {
+        grid-template-columns: 1fr;
+        gap: 18px;
+      }
+      .header-op,
+      .op-row {
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      /* 手机端：我方区域保持两列 */
+      .header-my,
+      .my-row {
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      input {
+        font-size: 16px;
+        padding: 10px 12px;
+      }
+
+      .actions {
+        flex-wrap: wrap;
+      }
+      .actions > div:first-child {
+        width: 100%;
+        margin-bottom: 4px;
+      }
+    }
+
+    @media (max-width: 360px) {
+      .grid-3 {
+        gap: 6px;
+      }
+      input {
+        padding: 9px 9px;
+      }
+      label, .mini-label {
+        font-size: 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <form id="gvg-form">
+      <div id="teams"></div>
+<div class="actions">
+    <div style="
+        margin-right:auto;
+        font-size:12px;
+        color:#6b7280;
+        display:flex;
+        align-items:center;
+    ">
+        Modified from
+        <a
+          href="https://github.com/zzasqas/ArkRecodetools/blob/main/guild-battle.html"
+          target="_blank"
+          style="margin-left:4px;color:#2563eb;text-decoration:none;"
+        >
+          ArkRecode Tools
+        </a>
+    </div>
+
+    <button type="button" class="action secondary" id="clearBtn">清空</button>
+    <button type="button" class="action" id="exportBtn">生成文本</button>
+</div>
+      <textarea id="output" readonly></textarea>
+    </form>
+  </div>
+
+  <script>
+    const OP_INITIAL_PLACEHOLDER = ['90', '80', '60'];
+
+    function teamTemplate(teamNo) {
+      return `
+        <section class="team-section" data-team="${teamNo}">
+          <div class="team-title">
+            <h2>${teamNo === 1 ? '第一队' : '第二队'}</h2>
+            <div class="result-toggle">
+              <button type="button" class="result-btn win" data-result="win">胜</button>
+              <button type="button" class="result-btn lose" data-result="lose">败</button>
+            </div>
+          </div>
+
+          <div class="speed-ref">
+            <div class="speed-ref-title">我方速度参考 <span>（非必填）</span></div>
+            <div class="grid-3">
+              <div><label>我方速度</label><input type="number" data-field="refSpeed" placeholder="例: 241"></div>
+              <div><label>初始行动值</label><input type="number" data-field="refInitial" placeholder="90"></div>
+              <div><label>随机值</label><input type="number" data-field="refRandom" placeholder="0~5"></div>
+            </div>
+          </div>
+
+          <div class="team-grid">
+            <div>
+              <div class="header-op">
+                <span class="side-title red">对手</span>
+                <span class="mini-label">行动值</span>
+                <span class="mini-label">随机值</span>
+                <span class="mini-label">备注</span>
+              </div>
+              ${[0,1,2].map(i => `
+                <div class="op-row" data-op="${i}">
+                  <input data-field="opName" placeholder="对手${i+1}">
+                  <input type="number" data-field="opInitial" placeholder="${OP_INITIAL_PLACEHOLDER[i]}">
+                  <input type="number" data-field="opRandom" placeholder="0~5">
+                  <div class="hint-wrap">
+                    <input data-field="opNote" placeholder="免疫/高抗等">
+                    <span class="speed-hint"></span>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+
+            <div>
+              <div class="header-my">
+                <span class="side-title blue">我方</span>
+                <span class="mini-label">速度</span>
+              </div>
+              ${[0,1,2].map(i => `
+                <div class="my-row" data-my="${i}">
+                  <input data-field="myName" placeholder="我方${i+1}">
+                  <input type="number" data-field="mySpeed" placeholder="例: 241">
+                </div>
+              `).join('')}
+            </div>
+          </div>
+
+          <div class="note">
+            <label>整体备注</label>
+            <input data-field="teamNote" placeholder="例：对方有免疫队长、我方带双治疗…">
+          </div>
+        </section>
+      `;
+    }
+
+    document.getElementById('teams').innerHTML = teamTemplate(1) + teamTemplate(2);
+
+    function calcSpeed(refSpeed, refInitial, refRandom, opInitial, opRandom) {
+      if (!opInitial) return '';
+      const oi = parseFloat(opInitial);
+      if (Number.isNaN(oi)) return '';
+      if (oi > 101) return `≈${Math.round(oi)}`;
+
+      const ms = parseFloat(refSpeed);
+      const mi = parseFloat(refInitial);
+      if (!ms || !mi) return '';
+
+      const mr = refRandom !== '' ? parseFloat(refRandom) : null;
+      const or = opRandom !== '' ? parseFloat(opRandom) : null;
+
+      if (mr !== null && !Number.isNaN(mr) && or !== null && !Number.isNaN(or)) {
+        const speed = Math.round((oi - or) * ms / (mi - mr));
+        return `≈${speed}`;
+      }
+
+      let min, max;
+      const ratioMin = ms / mi;
+      const ratioMax = ms / Math.max(mi - 5, 1);
+      if (or !== null && !Number.isNaN(or)) {
+        min = Math.round((oi - or) * ratioMin);
+        max = Math.round((oi - or) * ratioMax);
+      } else {
+        min = Math.round((oi - 5) * ratioMin);
+        max = Math.round(oi * ratioMax);
+      }
+      if (min > max) [min, max] = [max, min];
+      return min === max ? `≈${min}` : `≈${min}~${max}`;
+    }
+
+    function updateTeamSpeedHints(team) {
+      const refSpeed = team.querySelector('[data-field="refSpeed"]').value;
+      const refInitial = team.querySelector('[data-field="refInitial"]').value;
+      const refRandom = team.querySelector('[data-field="refRandom"]').value;
+      team.querySelectorAll('.op-row').forEach(row => {
+        const text = calcSpeed(
+          refSpeed,
+          refInitial,
+          refRandom,
+          row.querySelector('[data-field="opInitial"]').value,
+          row.querySelector('[data-field="opRandom"]').value
+        );
+        row.querySelector('.speed-hint').textContent = text;
+      });
+    }
+
+    document.querySelectorAll('.team-section').forEach(team => {
+      team.addEventListener('input', () => updateTeamSpeedHints(team));
+      team.querySelectorAll('.result-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const current = btn.classList.contains('active');
+          team.querySelectorAll('.result-btn').forEach(b => b.classList.remove('active'));
+          team.classList.remove('team-win', 'team-lose');
+          if (!current) {
+            btn.classList.add('active');
+            team.classList.add(btn.dataset.result === 'win' ? 'team-win' : 'team-lose');
+          }
+        });
+      });
+    });
+
+    function value(scope, selector) {
+      return (scope.querySelector(selector)?.value || '').trim();
+    }
+
+
+
+    function exportText() {
+      const lines = [];
+      document.querySelectorAll('.team-section').forEach((team, idx) => {
+        const title = idx === 0 ? '第一队' : '第二队';
+        const active = team.querySelector('.result-btn.active');
+        const result = active ? (active.dataset.result === 'win' ? '胜' : '败') : '未选';
+        lines.push(`${title}：${result}`);
+
+        const ops = [...team.querySelectorAll('.op-row')].map(row => {
+          const name = value(row, '[data-field="opName"]');
+          const hint = row.querySelector('.speed-hint').textContent;
+          const note = value(row, '[data-field="opNote"]');
+          return [name, hint, note].filter(Boolean).join(' ');
+        }).filter(Boolean);
+        if (ops.length) lines.push(`对手：${ops.join(' / ')}`);
+
+        const mys = [...team.querySelectorAll('.my-row')].map(row => {
+          const name = value(row, '[data-field="myName"]');
+          const speed = value(row, '[data-field="mySpeed"]');
+          return name ? (speed ? `${name}(${speed})` : name) : '';
+        }).filter(Boolean);
+        if (mys.length) lines.push(`我方：${mys.join(' / ')}`);
+
+        const note = value(team, '[data-field="teamNote"]');
+        if (note) lines.push(`备注：${note}`);
+        lines.push('');
+      });
+      const out = document.getElementById('output');
+      const text = lines.join('\n').trim();
+
+      out.value = text;
+      out.style.display = 'block';
+      out.select();
+
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).catch(() => {
+          document.execCommand('copy');
+         });
+      } else {
+         document.execCommand('copy');
+      }
+    }
+
+    document.getElementById('exportBtn').addEventListener('click', exportText);
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      if (!confirm('确定清空所有输入？')) return;
+      document.querySelectorAll('input').forEach(i => i.value = '');
+      document.querySelectorAll('.speed-hint').forEach(s => s.textContent = '');
+      document.querySelectorAll('.result-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.team-section').forEach(t => t.classList.remove('team-win', 'team-lose'));
+      const out = document.getElementById('output');
+      if (out) { out.value = ''; out.style.display = 'none'; }
+    });
+  </script>
+</body>
+</html>
