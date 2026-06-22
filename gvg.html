@@ -149,7 +149,7 @@
         white-space: nowrap;
       }
       /* 手机端：对手区域两列四格，顺序为：
-         对手 + 行动值 / 随机值 + 速度 */
+         对手 + 行动值 / 乱速值 + 速度值 */
       .team-grid {
         grid-template-columns: 1fr;
         gap: 18px;
@@ -233,9 +233,9 @@
           <div class="speed-ref">
             <div class="speed-ref-title">我方速度参考</div>
             <div class="grid-3">
-              <div><label>我方速度</label><input type="number" data-field="refSpeed" placeholder="例: 241"></div>
-              <div><label>初始行动值</label><input type="number" data-field="refInitial" placeholder="90"></div>
-              <div><label>随机值</label><input type="number" data-field="refRandom" placeholder="0~5"></div>
+              <div><label>速度值</label><input type="number" data-field="refSpeed" placeholder="例: 241"></div>
+              <div><label>行动值</label><input type="number" data-field="refInitial" placeholder="90"></div>
+              <div><label>乱速值</label><input type="number" data-field="refRandom" placeholder="0~5"></div>
             </div>
           </div>
 
@@ -244,8 +244,8 @@
               <div class="header-op">
                 <span class="side-title red">对手</span>
                 <span class="mini-label">行动值</span>
-                <span class="mini-label">随机值</span>
-                <span class="mini-label">速度</span>
+                <span class="mini-label">乱速值</span>
+                <span class="mini-label">速度值</span>
               </div>
               ${[0,1,2].map(i => `
                 <div class="op-row" data-op="${i}">
