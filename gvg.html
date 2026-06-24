@@ -339,23 +339,39 @@
 
     function exportText() {
       const lines = [];
+
       document.querySelectorAll('.team-section').forEach((team, idx) => {
         const title = idx === 0 ? '上半' : '下半';
         const active = team.querySelector('.result-btn.active');
         const result = active ? (active.dataset.result === 'win' ? '胜' : '败') : '未选';
-        lines.push(`${title}：${result}`);
 
         const ops = [...team.querySelectorAll('.op-row')].map(row => {
           const name = value(row, '[data-field="opName"]');
-          const speed = row.querySelector('[data-field="opSpeed"]').textContent;
-          return [name, speed].filter(Boolean).join(' ');
+
+          let speed = row.querySelector('[data-field="opSpeed"]').textContent.trim();
+          speed = speed.replace('≈', '');
+          speed = speed.replace('~', '∼');
+
+          if (!name && !speed) return '';
+          if (name && speed) return `${name}${speed}`;
+          return name || speed;
         }).filter(Boolean);
-        if (ops.length) lines.push(`对手：${ops.join(' / ')}`);
 
         const note = value(team, '[data-field="teamNote"]');
-        if (note) lines.push(`备注：${note}`);
-        lines.push('');
+
+        let line = `${title}（${result}）`;
+
+        if (ops.length) {
+          line += `：${ops.join('，')}`;
+        }
+
+        if (note) {
+          line += `（${note}）`;
+        }
+
+        lines.push(line);
       });
+
       const out = document.getElementById('output');
       const text = lines.join('\n').trim();
 
@@ -366,9 +382,9 @@
       if (navigator.clipboard && window.isSecureContext) {
         navigator.clipboard.writeText(text).catch(() => {
           document.execCommand('copy');
-         });
+        });
       } else {
-         document.execCommand('copy');
+        document.execCommand('copy');
       }
     }
 
