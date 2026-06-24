@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>公会战双队记录</title>
+  <title>团战测速</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -223,7 +223,7 @@
       return `
         <section class="team-section" data-team="${teamNo}">
           <div class="team-title">
-            <h2>${teamNo === 1 ? '第一队' : '第二队'}</h2>
+            <h2>${teamNo === 1 ? '上半' : '下半'}</h2>
             <div class="result-toggle">
               <button type="button" class="result-btn win" data-result="win">胜</button>
               <button type="button" class="result-btn lose" data-result="lose">败</button>
@@ -260,7 +260,7 @@
 
           <div class="note">
             <label>整体备注</label>
-            <input data-field="teamNote" placeholder="例：对方有免疫队长、我方带双治疗…">
+            <input data-field="teamNote" placeholder="例：对方是否有免疫，带的什么羁绊…">
           </div>
         </section>
       `;
@@ -340,7 +340,7 @@
     function exportText() {
       const lines = [];
       document.querySelectorAll('.team-section').forEach((team, idx) => {
-        const title = idx === 0 ? '第一队' : '第二队';
+        const title = idx === 0 ? '上半' : '下半';
         const active = team.querySelector('.result-btn.active');
         const result = active ? (active.dataset.result === 'win' ? '胜' : '败') : '未选';
         lines.push(`${title}：${result}`);
