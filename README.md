@@ -44,7 +44,7 @@ python Frida\speed.py
 ### 打包
 
 ```
-pyinstaller -F Frida/speed.py --collect-all frida --clean --noconfirm --icon=Frida/data/icon.ico
+pyinstaller -F Frida/speed.py --collect-all frida --collect-all UnityPy --clean --noconfirm --icon=Frida/data/icon.ico
 ```
 
 ## HoshinoBot 插件
