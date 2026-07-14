@@ -1,9 +1,9 @@
-"""Live GVG/PVP speed analyzer using Frida WebSocket packets."""
+"""Universal Ark Re:Code battle-speed analyzer using Frida packets."""
 
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -59,6 +59,12 @@ class HookLayout:
     decode_rva: int
     frame_data_offset: int
     frame_text_offset: int
+
+
+@dataclass(frozen=True)
+class PreparedBattle:
+    role_info: dict
+    label: str = ""
 
 
 _NAMESPACE_RE = re.compile(r"(?m)^// Namespace:\s*(?P<name>[^\r\n]*)\s*$")
@@ -412,19 +418,43 @@ def build_ally_role_info(role_map):
     return build_role_info({"CampData1": {"PositionRoleMap": role_map}})
 
 
+def prepare_battles_from_packet(data):
+    """Normalize all known battle setup packets into one queue format."""
+    start_info = data.get("StartBattleInfo")
+    if isinstance(start_info, dict):
+        return [PreparedBattle(build_role_info(start_info))]
+
+    team_group = data.get("PlayerTeamGroup")
+    if isinstance(team_group, dict):
+        return [
+            PreparedBattle(
+                build_ally_role_info(
+                    ((team_group.get(key) or {}).get("PositionRoleMap") or {})
+                ),
+                label,
+            )
+            for key, label in (
+                ("FirstTeam", "上半场"),
+                ("SecondTeam", "下半场"),
+            )
+        ]
+
+    player_team = data.get("PlayerTeamData")
+    if isinstance(player_team, dict):
+        role_map = player_team.get("PositionRoleMap") or {}
+        return [PreparedBattle(build_ally_role_info(role_map))]
+
+    return None
+
+
 class SpeedAnalyzer:
     def __init__(self):
         self.battle_no = 0
-        self.team_role_maps = []
-        self.next_team_index = 0
+        self.pending_battles = deque()
         self.role_info = {}
-        self.start_times = None
-        self.printed = False
-        self.enemy_estimates = {}
-        self.enemy_roles = {}
-        self.enemy_hp = {}
-        self.announced_enemy_roles = set()
-        self.ignore_next_start_signal = False
+        self.wave_phase = 0
+        self.wave_phase_count = 1
+        self.reset_phase_state()
 
     def handle_packet(self, _tag, text):
         try:
@@ -433,55 +463,62 @@ class SpeedAnalyzer:
             return
         if not isinstance(data, dict):
             return
-        team_group = data.get("PlayerTeamGroup")
-        if isinstance(team_group, dict):
-            self.handle_team_group(team_group)
-        start_info = data.get("StartBattleInfo")
-        if isinstance(start_info, dict):
-            self.start_battle_with_role_info(build_role_info(start_info))
-            self.ignore_next_start_signal = True
-        elif data.get("StartBattle") is True:
-            if self.ignore_next_start_signal:
-                self.ignore_next_start_signal = False
-            else:
-                self.start_gvg_battle()
+        prepared = prepare_battles_from_packet(data)
+        if prepared is not None:
+            self.pending_battles = deque(prepared)
+        if data.get("StartBattle") is True:
+            self.start_pending_battle()
+
+        step = data.get("Step")
         round_result = data.get("RoundResult")
         if isinstance(round_result, dict):
-            self.handle_round_result(data.get("Step"), round_result)
+            self.handle_round_result(step, round_result)
         action_result = data.get("ActionResult")
         if isinstance(action_result, dict):
             self.handle_action_result(action_result)
 
-    def handle_team_group(self, team_group):
-        self.ignore_next_start_signal = False
-        self.team_role_maps = [
-            ((team_group.get(key) or {}).get("PositionRoleMap") or {})
-            for key in ("FirstTeam", "SecondTeam")
-        ]
-        self.next_team_index = 0
+    def start_pending_battle(self):
+        if not self.pending_battles:
+            return False
+        prepared = self.pending_battles.popleft()
+        if not prepared.role_info:
+            return False
+        self.start_battle(prepared.role_info, prepared.label)
+        return True
 
-    def start_gvg_battle(self):
-        index = self.next_team_index
-        if index >= len(self.team_role_maps):
-            return
-        self.next_team_index += 1
-        role_map = self.team_role_maps[index]
-        if not role_map:
-            return
-        half = ("上半场", "下半场")[index] if index < 2 else ""
-        self.start_battle_with_role_info(build_ally_role_info(role_map), half)
-
-    def start_battle_with_role_info(self, role_info, half=""):
-        self.battle_no += 1
+    def start_battle(self, role_info, label=""):
         self.role_info = role_info
+        ally_waves = {
+            role_id.split("-")[1]
+            for role_id in role_info
+            if role_id.startswith("1-") and role_id.count("-") == 2
+        }
+        self.wave_phase = 0
+        self.wave_phase_count = max(len(ally_waves), 1)
+        if not label and self.wave_phase_count > 1:
+            label = self.phase_name(0)
+        self.start_phase(label)
+
+    def reset_phase_state(self):
         self.start_times = None
         self.printed = False
         self.enemy_estimates = {}
         self.enemy_roles = {}
-        self.enemy_hp = {}
+        self.enemy_base_max_hp = {}
+        self.enemy_injury_rates = {}
         self.announced_enemy_roles = set()
-        suffix = f"（{half}）" if half else ""
+        self.announced_enemy_artifacts = set()
+
+    def start_phase(self, label=""):
+        self.battle_no += 1
+        self.reset_phase_state()
+        suffix = f"（{label}）" if label else ""
         print(f"\n===== 战斗 {self.battle_no}{suffix} =====")
+
+    def phase_name(self, index):
+        if self.wave_phase_count == 2:
+            return ("上半场", "下半场")[index]
+        return f"第 {index + 1} 波"
 
     def handle_round_result(self, step, round_result):
         role_time_map = round_result.get("RoleTimeMap")
@@ -494,12 +531,21 @@ class SpeedAnalyzer:
         }
         if not times:
             return
+        if (
+            step == "StartWave"
+            and self.printed
+            and self.wave_phase + 1 < self.wave_phase_count
+        ):
+            self.wave_phase += 1
+            self.start_phase(self.phase_name(self.wave_phase))
+            self.start_times = times
+            return
         if self.start_times is None:
             self.start_times = times
             return
         if self.printed:
             return
-        if step == "StartRound" and int(round_result.get("NowTurn") or 0) == 1:
+        if step == "StartRound":
             self.print_speed_report(times)
             self.printed = True
             self.announce_pending_enemy_roles()
@@ -508,7 +554,7 @@ class SpeedAnalyzer:
         events = action_result.get("SkillEventList") or []
         for event in events:
             for role_event in (event or {}).get("RoleEventList") or []:
-                self.update_enemy_hp(role_event or {})
+                self.update_enemy_max_hp(role_event or {})
 
         artifact_triggers = set()
         for event in events:
@@ -545,28 +591,87 @@ class SpeedAnalyzer:
         for owner_id, artifact_id in sorted(
             artifact_triggers, key=lambda item: (role_sort_key(item[0]), item[1])
         ):
+            trigger = owner_id, artifact_id
+            if trigger in self.announced_enemy_artifacts:
+                continue
             print(
                 f"敌方羁绊触发｜{owner_id} → {artifact_id} → "
                 f"{MASTER.artifact_name(artifact_id)}"
             )
+            self.announced_enemy_artifacts.add(trigger)
 
-    def update_enemy_hp(self, role_event):
+    def update_enemy_max_hp(self, role_event):
         role_id = role_event.get("TargetRoleID")
         if not isinstance(role_id, str) or not role_id.startswith("2-"):
             return
-        now_hp = role_event.get("NowHP")
+
+        hit_info = role_event.get("HitInfo") or {}
         last_hp = role_event.get("LastHP")
-        hp_diff = (role_event.get("HitInfo") or {}).get("HPDiffValue")
-        if not isinstance(now_hp, (int, float)) or isinstance(now_hp, bool):
-            return
+        now_hp = role_event.get("NowHP")
+        hp_diff = hit_info.get("HPDiffValue")
+        add_injury_rate = role_event.get("AddInjuryRate")
+        new_max_hp = hit_info.get("newMaxHPValue")
         if not any(
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and value != 0
-            for value in (now_hp, last_hp, hp_diff)
+            self.is_number(value) and value != 0
+            for value in (
+                last_hp,
+                now_hp,
+                hp_diff,
+                add_injury_rate,
+                new_max_hp,
+            )
         ):
             return
-        self.enemy_hp[role_id] = now_hp
+
+        injury_rate = role_event.get("NowInjuryRate")
+        if self.is_number(injury_rate):
+            injury_rate = self.clamp_injury_rate(injury_rate)
+            self.enemy_injury_rates[role_id] = injury_rate
+        else:
+            injury_rate = self.enemy_injury_rates.get(role_id, 0.0)
+
+        if self.is_number(new_max_hp) and new_max_hp > 0:
+            self.enemy_base_max_hp[role_id] = float(new_max_hp) / (
+                1.0 - injury_rate
+            )
+            return
+
+        if role_id in self.enemy_base_max_hp:
+            return
+
+        previous_injury_rate = injury_rate
+        if self.is_number(add_injury_rate):
+            previous_injury_rate = self.clamp_injury_rate(
+                injury_rate - float(add_injury_rate)
+            )
+
+        if self.is_number(last_hp) and last_hp > 0:
+            observed_hp = float(last_hp)
+            observed_injury_rate = previous_injury_rate
+        elif self.is_number(now_hp) and now_hp > 0:
+            observed_hp = float(now_hp)
+            observed_injury_rate = injury_rate
+        else:
+            return
+
+        self.enemy_base_max_hp[role_id] = observed_hp / (
+            1.0 - observed_injury_rate
+        )
+
+    @staticmethod
+    def is_number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    @staticmethod
+    def clamp_injury_rate(value):
+        return min(max(float(value), 0.0), 0.999999)
+
+    def enemy_current_max_hp(self, role_id):
+        base_max_hp = self.enemy_base_max_hp.get(role_id)
+        if base_max_hp is None:
+            return None
+        injury_rate = self.enemy_injury_rates.get(role_id, 0.0)
+        return max(round(base_max_hp * (1.0 - injury_rate)), 0)
 
     def announce_pending_enemy_roles(self):
         for role_id in sorted(self.enemy_roles, key=role_sort_key):
@@ -579,10 +684,16 @@ class SpeedAnalyzer:
         if not static_id:
             return
         name = self.role_info.get(role_id, {}).get("name") or static_id
+        current_max_hp = self.enemy_current_max_hp(role_id)
+        max_hp_text = (
+            f"｜当前最大生命 {current_max_hp}"
+            if current_max_hp is not None
+            else ""
+        )
         print(
             f"识别敌方｜{role_id} → {static_id} → {name}"
             f"｜测速 {self.enemy_estimates.get(role_id, '-')}"
-            f"｜当前血量 {fmt_float(self.enemy_hp.get(role_id), 2)}"
+            f"{max_hp_text}"
         )
         self.announced_enemy_roles.add(role_id)
 
@@ -735,7 +846,7 @@ def run_live(process_name, layout):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="实时计算 Ark Re:Code GVG/PVP 敌方速度"
+        description="实时计算 Ark Re:Code GVG/PVP/深渊敌方速度"
     )
     parser.add_argument(
         "-p", "--process", default=DEFAULT_PROCESS,
