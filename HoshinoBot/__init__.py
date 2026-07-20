@@ -1,7 +1,7 @@
 import re
 from hoshino import Service, priv
 from hoshino.typing import CQEvent
-from .speed import compute_speed_async, overtake_prob
+from .HoshinoBot.speed import compute_speed_async, overtake_prob
 
 sv_name = '团战测速'
 sv_help = (
