@@ -6,10 +6,12 @@ import argparse
 from collections import Counter, deque
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 import re
 import sqlite3
 import sys
+import threading
 import time
 import unicodedata
 
@@ -65,6 +67,14 @@ class HookLayout:
 class PreparedBattle:
     role_info: dict
     label: str = ""
+
+
+@dataclass(frozen=True)
+class SpeedEstimate:
+    most_likely: int
+    low: float
+    high: float
+    consistent: bool = True
 
 
 _NAMESPACE_RE = re.compile(r"(?m)^// Namespace:\s*(?P<name>[^\r\n]*)\s*$")
@@ -350,6 +360,37 @@ def action_delta(start, end):
     return delta + 1 if delta < 0 else delta
 
 
+def quantized_gauge(value, maximum=1.0, exact_zero=False):
+    """Return the displayed whole percent and its possible source interval."""
+    if value is None:
+        return "-", None
+    value = min(max(float(value), 0.0), maximum)
+    percent = min(math.floor(value * 100 + 0.5 + 1e-12), round(maximum * 100))
+    if exact_zero and abs(value) <= 1e-12:
+        interval = (0.0, 0.0)
+    else:
+        interval = (
+            max(0.0, (percent - 0.5) / 100),
+            min(maximum, (percent + 0.5) / 100),
+        )
+    return f"{percent}%", interval
+
+
+def quantized_delta_interval(start, end, start_interval, end_interval):
+    if (
+        start is None
+        or end is None
+        or start_interval is None
+        or end_interval is None
+    ):
+        return None
+    start_low, start_high = start_interval
+    end_low, end_high = end_interval
+    if end < start:
+        return 1 + end_low - start_high, 1 + end_high - start_low
+    return max(0.0, end_low - start_high), max(0.0, end_high - start_low)
+
+
 def estimate_speed_value(values):
     rounded = [round(value) for value in values]
     counts = Counter(rounded)
@@ -365,6 +406,67 @@ def estimate_speed_value(values):
         else (values[middle - 1] + values[middle]) / 2
     )
     return round(median)
+
+
+def format_speed_interval(estimate):
+    if estimate is None:
+        return "-"
+    low = max(0, math.ceil(estimate.low - 1e-12))
+    high = math.floor(estimate.high + 1e-12)
+    if high < low:
+        low = high = max(0, round((estimate.low + estimate.high) / 2))
+    text = f"[{low}–{high}]"
+    return text if estimate.consistent else f"约{text}"
+
+
+def estimate_quantized_speed(enemy_delta, ally_refs):
+    """Intersect speed constraints and fit the shared race time by least squares."""
+    if enemy_delta is None or not ally_refs:
+        return None
+    enemy_low, enemy_high = enemy_delta
+    constraints = []
+    time_ranges = []
+    least_squares_numerator = 0.0
+    least_squares_denominator = 0.0
+    for _, ally_speed, ally_delta in ally_refs:
+        if not ally_speed or ally_delta is None:
+            continue
+        ally_low, ally_high = ally_delta
+        if ally_high <= 0:
+            continue
+        denominator_low = max(ally_low, 1e-12)
+        constraints.append((
+            ally_speed * enemy_low / ally_high,
+            ally_speed * enemy_high / denominator_low,
+        ))
+        time_ranges.append((
+            ally_low / ally_speed,
+            ally_high / ally_speed,
+        ))
+        ally_midpoint = (ally_low + ally_high) / 2
+        least_squares_numerator += ally_speed * ally_midpoint
+        least_squares_denominator += ally_speed * ally_speed
+    if not constraints or not time_ranges or least_squares_denominator <= 0:
+        return None
+
+    low = max(item[0] for item in constraints)
+    high = min(item[1] for item in constraints)
+    time_low = max(item[0] for item in time_ranges)
+    time_high = min(item[1] for item in time_ranges)
+    consistent = low <= high and time_low <= time_high
+    if not consistent:
+        # Keep producing a useful result when rounded panel speeds or game-side
+        # modifiers make the strict intersection empty.
+        low = min(item[0] for item in constraints)
+        high = max(item[1] for item in constraints)
+
+    race_time = least_squares_numerator / least_squares_denominator
+    if time_low <= time_high:
+        race_time = min(max(race_time, time_low), time_high)
+    enemy_midpoint = (enemy_low + enemy_high) / 2
+    most_likely = enemy_midpoint / max(race_time, 1e-12)
+    most_likely = min(max(most_likely, low), high)
+    return SpeedEstimate(round(most_likely), low, high, consistent)
 
 
 def role_static_id_from_skill(skill_id):
@@ -448,12 +550,14 @@ def prepare_battles_from_packet(data):
 
 
 class SpeedAnalyzer:
-    def __init__(self):
+    def __init__(self, exact_mode=False):
         self.battle_no = 0
         self.pending_battles = deque()
         self.role_info = {}
         self.wave_phase = 0
         self.wave_phase_count = 1
+        self.exact_mode = exact_mode
+        self.last_end_times = None
         self.reset_phase_state()
 
     def handle_packet(self, _tag, text):
@@ -502,6 +606,7 @@ class SpeedAnalyzer:
     def reset_phase_state(self):
         self.start_times = None
         self.printed = False
+        self.last_end_times = None
         self.enemy_estimates = {}
         self.enemy_roles = {}
         self.enemy_base_max_hp = {}
@@ -697,9 +802,17 @@ class SpeedAnalyzer:
         )
         self.announced_enemy_roles.add(role_id)
 
+    def toggle_display_mode(self):
+        self.exact_mode = not self.exact_mode
+        mode = "精确测速" if self.exact_mode else "百分比区间测速"
+        print(f"\n[显示模式] 已切换为{mode}")
+        if self.last_end_times is not None:
+            self.print_speed_report(self.last_end_times)
+
     def print_speed_report(self, end_times):
         if not self.start_times:
             return
+        self.last_end_times = dict(end_times)
         rows, ally_refs, unaffected_refs = [], [], []
         role_ids = sorted(
             set(self.start_times) | set(end_times), key=role_sort_key
@@ -709,12 +822,16 @@ class SpeedAnalyzer:
             start = self.start_times.get(role_id)
             end = end_times.get(role_id)
             delta = action_delta(start, end)
+            start_display, start_interval = quantized_gauge(start, maximum=0.05)
+            end_display, end_interval = quantized_gauge(
+                end, exact_zero=True
+            )
+            if end is not None and abs(end) <= 1e-12:
+                end_display = "100%"
+            delta_interval = quantized_delta_interval(
+                start, end, start_interval, end_interval
+            )
             speed = info.get("speed")
-            if role_id.startswith("1-") and speed and delta and delta > 0:
-                reference = role_id, speed, delta
-                ally_refs.append(reference)
-                if not info.get("speed_imprint_affected", False):
-                    unaffected_refs.append(reference)
             rows.append({
                 "role_id": role_id,
                 "side": "我方" if role_id.startswith("1-") else "敌方",
@@ -722,27 +839,100 @@ class SpeedAnalyzer:
                 "start": start,
                 "end": end,
                 "delta": delta,
+                "start_display": start_display,
+                "end_display": end_display,
+                "delta_interval": delta_interval,
                 "speed": speed,
             })
-        self.enemy_estimates = self.estimate_enemy_speeds(
-            rows, unaffected_refs or ally_refs
-        )
+            if (
+                role_id.startswith("1-")
+                and speed
+                and delta
+                and delta > 0
+                and delta_interval is not None
+            ):
+                reference = role_id, speed, delta_interval
+                ally_refs.append(reference)
+                if not info.get("speed_imprint_affected", False):
+                    unaffected_refs.append(reference)
+        range_refs = unaffected_refs or ally_refs
+        exact_refs = [
+            (
+                role_id,
+                speed,
+                next(
+                    row["delta"]
+                    for row in rows
+                    if row["role_id"] == role_id
+                ),
+            )
+            for role_id, speed, _ in range_refs
+        ]
+        exact_estimates = self.estimate_enemy_speeds(rows, exact_refs)
+        range_estimates = self.estimate_enemy_speed_ranges(rows, range_refs)
+        if self.exact_mode:
+            self.enemy_estimates = exact_estimates
+        else:
+            self.enemy_estimates = {
+                role_id: (
+                    f"{estimate.most_likely} "
+                    f"{format_speed_interval(estimate)}"
+                )
+                for role_id, estimate in range_estimates.items()
+            }
+
         table_rows = []
+        if self.exact_mode:
+            for row in rows:
+                speed = row["speed"]
+                if row["role_id"].startswith("2-"):
+                    speed = exact_estimates.get(row["role_id"], "-")
+                table_rows.append([
+                    row["side"],
+                    row["role_id"],
+                    row["name"],
+                    fmt_float(row["start"]),
+                    fmt_float(row["end"]),
+                    fmt_float(row["delta"]),
+                    speed,
+                ])
+            print_table(
+                ["阵营", "RoleID", "角色", "乱速值", "行动值", "差值", "速度"],
+                table_rows,
+            )
+            return
+
         for row in rows:
-            speed = row["speed"]
-            if row["role_id"].startswith("2-"):
-                speed = self.enemy_estimates.get(row["role_id"], "-")
+            estimate = range_estimates.get(row["role_id"])
+            if row["role_id"].startswith("1-"):
+                interval = (
+                    f"[{row['speed']}–{row['speed']}]"
+                    if row["speed"]
+                    else "-"
+                )
+                most_likely = row["speed"] or "-"
+            else:
+                interval = format_speed_interval(estimate)
+                most_likely = estimate.most_likely if estimate else "-"
             table_rows.append([
                 row["side"],
                 row["role_id"],
                 row["name"],
-                fmt_float(row["start"]),
-                fmt_float(row["end"]),
-                fmt_float(row["delta"]),
-                speed,
+                row["start_display"].rjust(3),
+                row["end_display"].rjust(5),
+                interval,
+                most_likely,
             ])
         print_table(
-            ["阵营", "RoleID", "角色", "乱速值", "行动值", "差值", "速度"],
+            [
+                "阵营",
+                "RoleID",
+                "角色",
+                "乱速",
+                "行动条",
+                "速度区间",
+                "期望",
+            ],
             table_rows,
         )
 
@@ -769,6 +959,18 @@ class SpeedAnalyzer:
                 else f"{speed}({round(low)}-{round(high)})"
             )
         return result
+
+    @staticmethod
+    def estimate_enemy_speed_ranges(rows, ally_refs):
+        return {
+            row["role_id"]: estimate
+            for row in rows
+            if row["role_id"].startswith("2-")
+            for estimate in [
+                estimate_quantized_speed(row["delta_interval"], ally_refs)
+            ]
+            if estimate is not None
+        }
 
 
 def _find_process(device, target):
@@ -806,32 +1008,84 @@ def _wait_for_process(device, target, interval=1):
     return process
 
 
+def _listen_for_display_commands(analyzer):
+    while True:
+        try:
+            command = input()
+        except (EOFError, OSError):
+            return
+        if command.strip() == "114514":
+            analyzer.toggle_display_mode()
+
+
 def run_live(process_name, layout):
     try:
         import frida
     except ImportError:
         raise SpeedError("缺少 frida，请先运行：pip install frida")
     device = frida.get_local_device()
-    process = _wait_for_process(device, process_name)
-    if process is None:
-        return
-
     analyzer = SpeedAnalyzer()
     session = None
+
+    retryable_errors = tuple(
+        getattr(frida, name)
+        for name in (
+            "InvalidOperationError",
+            "NotSupportedError",
+            "OperationCancelledError",
+            "PermissionDeniedError",
+            "ProcessNotFoundError",
+            "ProcessNotRespondingError",
+            "ProtocolError",
+            "ServerNotRunningError",
+            "TimedOutError",
+            "TransportError",
+        )
+        if hasattr(frida, name)
+    )
+
+    def on_message(message, _data):
+        if message.get("type") == "send":
+            payload = message.get("payload") or {}
+            analyzer.handle_packet(payload.get("tag"), payload.get("text", ""))
+        elif message.get("type") == "error":
+            print(message.get("stack") or message, file=sys.stderr)
+
     try:
-        session = device.attach(process.pid)
-        script = session.create_script(build_hook_source(layout))
+        for attempt in range(1, 4):
+            process = _wait_for_process(device, process_name)
+            if process is None:
+                return
+            try:
+                session = device.attach(process.pid)
+                script = session.create_script(build_hook_source(layout))
+                script.on("message", on_message)
+                script.load()
+                break
+            except retryable_errors as exc:
+                if session is not None:
+                    try:
+                        session.detach()
+                    except Exception:
+                        pass
+                    session = None
+                print(f"注入失败（第 {attempt}/3 次）：{exc}", file=sys.stderr)
+                if attempt == 3:
+                    print(
+                        "注入失败：已连续尝试 3 次。建议使用管理员权限运行；"
+                        "如果仍然失败，请尝试重启游戏或电脑后再运行。",
+                        file=sys.stderr,
+                    )
+                    return
+                print("将在 2 秒后重新尝试注入...", file=sys.stderr)
+                time.sleep(2)
 
-        def on_message(message, _data):
-            if message.get("type") == "send":
-                payload = message.get("payload") or {}
-                analyzer.handle_packet(payload.get("tag"), payload.get("text", ""))
-            elif message.get("type") == "error":
-                print(message.get("stack") or message, file=sys.stderr)
-
-        script.on("message", on_message)
-        script.load()
         print(f"已附加到 {process.name} (PID {process.pid})，等待战斗数据...")
+        threading.Thread(
+            target=_listen_for_display_commands,
+            args=(analyzer,),
+            daemon=True,
+        ).start()
         while True:
             time.sleep(1)
     except KeyboardInterrupt:

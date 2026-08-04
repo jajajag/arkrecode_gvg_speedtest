@@ -2,6 +2,7 @@ import re
 from hoshino import Service, priv
 from hoshino.typing import CQEvent
 from .HoshinoBot.speed import compute_speed_async, overtake_prob
+from .HoshinoBot.xiyan import register_xiyan
 
 sv_name = '团战测速'
 sv_help = (
@@ -16,7 +17,8 @@ sv_help = (
     '[团战总结] 直接输出团战总结，示例：\n'
     '团战总结 上路上半 水马 1 56 135 水琴 1 70 170 水拳 4 58 131 朱茵 1 101 专武1.3w 盖儿 1 84 闪避羁绊\n'
     '[乱速] 计算两个角色乱速的概率，示例：\n'
-    '乱速 245 240'
+    '乱速 245 240\n'
+    '[夕颜若雪] 团战数据、作业与成员信息，发送“夕颜若雪”查看用法'
 ).strip()
 
 sv = Service(name=sv_name, use_priv=priv.NORMAL, manage_priv=priv.ADMIN,
@@ -161,3 +163,6 @@ async def overtake(bot, ev: CQEvent):
             f'\n乱速的概率为：{percent}%', at_sender=True)
     except Exception as e:
         await bot.send(ev, f'计算错误，请检查输入数值是否正确', at_sender=True)
+
+
+register_xiyan(sv)

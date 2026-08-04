@@ -49,12 +49,19 @@ pyinstaller -F Frida/speed.py --collect-all frida --collect-all UnityPy --clean 
 
 ## HoshinoBot 插件
 
-将 `HoshinoBot/` 目录复制到 HoshinoBot 的模块目录，并命名为 `ark_recode_gvg_speedtest`：
+将仓库根目录的 `__init__.py` 和整个 `HoshinoBot/` 目录复制到 HoshinoBot
+的模块目录，并将模块目录命名为 `ark_recode_gvg_speedtest`：
 
 ```text
 hoshino/modules/ark_recode_gvg_speedtest/
 ├─ __init__.py
-└─ speed.py
+└─ HoshinoBot/
+   ├─ __init__.py
+   ├─ speed.py
+   ├─ xiyan.py
+   ├─ xiyan_master.py
+   └─ data/
+      └─ account_example.json
 ```
 
 然后在 `config/__bot__.py` 的模块列表中加入：
@@ -64,6 +71,38 @@ hoshino/modules/ark_recode_gvg_speedtest/
 ```
 
 重启 HoshinoBot 后，发送 `团战测速` 或 `帮助团战测速` 查看用法。
+
+夕颜若雪团战模块还需要安装：
+
+```text
+pip install requests UnityPy
+```
+
+复制 `HoshinoBot/data/account_example.json` 为
+`HoshinoBot/data/account.json`，填写一个账号的 Token、我方团和目标团的
+GID/团名。`account.json`、运行时数据库、角色别名和 `master.db` 已加入
+`.gitignore`，不会被提交。
+
+机器人会在周一、三、五 08:05 整表刷新目标团当前防守，在周二、四、六
+08:05 更新两团互相进攻的团战记录；两种更新都会检查 `master.db` 并下载角色
+别名表。下载 catalog 和 bundle 时只使用临时目录，构建结束后只保留
+`master.db`。
+
+可用指令：
+
+```text
+夕颜若雪 团战作业 角色1 角色2 角色3
+夕颜若雪 防守
+夕颜若雪 胜率表
+夕颜若雪 一速 玩家名 227
+夕颜若雪 一速 玩家名 265-270
+夕颜若雪 信息 玩家名 备注内容
+夕颜若雪 玩家名
+夕颜若雪 玩家名头像角色
+夕颜若雪 更新数据
+```
+
+其中“更新数据”仅限机器人主人。周日手动更新会同时刷新防守和互打记录。
 
 示例：
 

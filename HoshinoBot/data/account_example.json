@@ -1,0 +1,8 @@
+{
+  "Name": "机器人账号",
+  "Token": "请填写 accounts.json 中单个账号的 Token",
+  "our_guild_id": "请填写我方佣兵团 GID",
+  "our_guild_name": "烟雨阁",
+  "target_guild_id": "请填写目标佣兵团 GID",
+  "target_guild_name": "夕颜若雪"
+}
