@@ -1040,14 +1040,15 @@ def format_solutions(role_ids, db_path=DATA_DB_PATH):
     target = tuple(sorted(role_ids))
     roles = _role_name_map()
     defense = '防守：{}'.format(
-        '+'.join(roles.get(role, role) for role in role_ids))
+        '+'.join(roles.get(role, role) for role in target))
     sections = []
     for guild in (config['our_guild_name'], config['target_guild_name']):
         grouped = defaultdict(list)
         for item in rounds:
             row = item['row']
             if row['atk_guild'] == guild and tuple(sorted(item['def'])) == target:
-                grouped[item['atk']].append(item)
+                team = tuple(sorted(item['atk']))
+                grouped[team].append(item)
         ranked = []
         for team, items in grouped.items():
             total = len(items)
@@ -1104,7 +1105,7 @@ def format_defenses(db_path=DATA_DB_PATH):
             '上半：{}'.format(first),
             '下半：{}'.format(second),
         )))
-    return title + '\n\n' + '\n\n'.join(blocks)
+    return title + '\n\n' + '\n'.join(blocks)
 
 
 def member_defense_stats(conn, cuid, our_guild_name):
