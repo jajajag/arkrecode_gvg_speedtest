@@ -59,7 +59,11 @@ hoshino/modules/ark_recode_gvg_speedtest/
    ├─ __init__.py
    ├─ speed.py
    ├─ gvg.py
-   ├─ gvg_master.py
+   ├─ api.py
+   ├─ database.py
+   ├─ updater.py
+   ├─ queries.py
+   ├─ master.py
    └─ data/
       └─ account_example.json
 ```
@@ -79,13 +83,14 @@ pip install requests UnityPy
 ```
 
 复制 `HoshinoBot/data/account_example.json` 为
-`HoshinoBot/data/account.json`，填写一个账号的 Token、我方团和目标团的
-GID/团名。`account.json`、运行时数据库、角色别名和 `master.db` 已加入
-`.gitignore`，不会被提交。
+`HoshinoBot/data/account.json`，填写一个账号的名称和 Token。团名和团 ID
+会从 `GuildWarData` 自动获取。`account.json`、运行时数据库、角色别名和
+`master.db` 已加入 `.gitignore`，不会被提交。
 
-机器人会在周一、三、五 08:05 整表刷新目标团当前防守，在周二、四、六
-08:05 更新两团互相进攻的团战记录；两种更新都会检查 `master.db` 并下载角色
-别名表。下载 catalog 和 bundle 时只使用临时目录，构建结束后只保留
+机器人每天 08:05 查询 `GuildWarData`。存在敌方阵营时，直接用响应中的防守
+阵容整表重建当前敌方团防守；只有我方阵营时，保留上次防守，并更新 PVP
+装备和团战排行榜前 20 团的历史战斗。两种更新都会检查 `master.db` 并下载
+角色别名表。下载 catalog 和 bundle 时只使用临时目录，构建结束后只保留
 `master.db`。
 
 可用指令：
@@ -98,11 +103,14 @@ GID/团名。`account.json`、运行时数据库、角色别名和 `master.db` �
 团战 一速 玩家名 265-270
 团战 信息 玩家名 备注内容
 团战 玩家名
-团战 玩家名头像角色
 团战 更新数据
 ```
 
-其中“更新数据”仅限机器人主人，每次手动更新都会同时刷新防守和互打记录。
+其中“更新数据”仅限机器人主人，手动更新与当天 08:05 的自动更新使用同一套
+分支逻辑。作业查询在最近 30 天找不到当前双方团的解法时，会自动改用所有团
+的进攻记录，最多显示 10 组解法。“一速”可以匹配历次防守中出现过的成员；
+胜率表在我方最近 30 天没有进攻过当前敌方团时，会提示并改用所有团对该敌方
+团的进攻记录计算整体防守胜率。
 
 示例：
 

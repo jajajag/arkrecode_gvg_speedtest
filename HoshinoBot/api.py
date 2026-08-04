@@ -1,0 +1,306 @@
+import base64
+import json
+import random
+import time
+from pathlib import Path
+
+import requests
+
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / 'data'
+ACCOUNT_PATH = DATA_DIR / 'account.json'
+
+GAME_URL = 'https://game-arkre-labs.ecchi.xxx/Router/RouterHandler.ashx'
+TOKEN_URL = 'https://sadpki-portal-v2.ebuajk.com/api/v2/token/access'
+GAME_HEADERS = {
+    'Content-Type': 'application/octet-stream',
+    'User-Agent': (
+        'UnityPlayer/2022.3.62f2 '
+        '(UnityWebRequest/1.0, libcurl/8.10.1-DEV)'
+    ),
+}
+
+requests.packages.urllib3.disable_warnings()
+
+
+class ConfigError(RuntimeError):
+    pass
+
+
+class GameRequestError(RuntimeError):
+    pass
+
+
+def oid(value):
+    if isinstance(value, dict):
+        return str(value.get('$oid') or value.get('$id') or '')
+    return str(value or '')
+
+
+def load_config(path=ACCOUNT_PATH):
+    path = Path(path)
+    if not path.is_file():
+        raise ConfigError(
+            '找不到 {}，请复制 account_example.json 后填写。'.format(path.name))
+    try:
+        with path.open('r', encoding='utf-8') as file:
+            config = json.load(file)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError('account.json 读取失败：{}'.format(exc)) from exc
+    required = ('Name', 'Token')
+    missing = [key for key in required if not str(config.get(key, '')).strip()]
+    if missing:
+        raise ConfigError('account.json 缺少：{}'.format('、'.join(missing)))
+    return config
+
+
+def save_config(config, path=ACCOUNT_PATH):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + '.tmp')
+    with temp_path.open('w', encoding='utf-8') as file:
+        json.dump(config, file, ensure_ascii=False, indent=2)
+    temp_path.replace(path)
+
+
+class GameClient:
+    def __init__(self, config, account_path=ACCOUNT_PATH, session=None):
+        self.config = config
+        self.account_path = Path(account_path)
+        self.http = session or requests.Session()
+        self.aid = None
+        self.session_id = None
+        self.cuid = None
+        self.bulletin = None
+        self.rank_week = None
+
+    def _post(self, url, payload=None, headers=None, timeout=60):
+        response = self.http.post(
+            url,
+            json=payload,
+            headers=headers or GAME_HEADERS,
+            verify=False,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        response.encoding = 'utf-8'
+        data = response.json()
+        self._check_response(data)
+        return data
+
+    @staticmethod
+    def _check_response(data):
+        if not isinstance(data, dict):
+            raise GameRequestError('服务器返回的不是 JSON 对象')
+        error = data.get('Error') or data.get('error')
+        error_code = data.get('ErrorCode')
+        code = data.get('Code', data.get('code'))
+        bad_code = code not in (None, 0, '0', 200, '200', 'Success', 'success')
+        if data.get('Success') is False or error \
+                or error_code not in (None, 0, '0', '') or bad_code:
+            message = data.get('Message') or data.get('message')
+            raise GameRequestError(str(message or error or error_code or code))
+
+    def _send_route(self, route, data, delay=None):
+        if delay:
+            time.sleep(random.uniform(*delay))
+        return self._post(GAME_URL, {'route': route, 'data': data})
+
+    def _login_once(self):
+        bulletin = self._send_route(
+            'GameServerDBSettingHandler.QueryBulletinInfoResult', {})
+        info = bulletin.get('Info') or {}
+        versions = info.get('AvailableVersions') or []
+        if not versions:
+            raise GameRequestError('公告响应缺少 AvailableVersions')
+
+        token = self.config['Token']
+        parts = token.split('.')
+        if len(parts) < 2:
+            raise ConfigError('Token 不是有效的 JWT')
+        encoded = parts[1] + '=' * (-len(parts[1]) % 4)
+        try:
+            token_data = json.loads(base64.urlsafe_b64decode(encoded))
+            login_id = token_data['user_id']
+        except Exception as exc:
+            raise ConfigError('Token 无法解析 user_id') from exc
+
+        is_new_sdk = 'exp' in token_data
+        login_token = token
+        if is_new_sdk:
+            headers = dict(GAME_HEADERS)
+            headers['Authorization'] = 'Bearer {}'.format(token)
+            token_result = self._post(
+                TOKEN_URL, headers=headers, timeout=60)
+            token_payload = token_result.get('data') or {}
+            login_id = token_payload.get('userId')
+            login_token = token_payload.get('accessToken')
+            refresh_token = token_payload.get('refreshToken')
+            if not login_id or not login_token or not refresh_token:
+                raise GameRequestError('刷新 Token 的响应字段不完整')
+            self.config['Token'] = refresh_token
+            save_config(self.config, self.account_path)
+
+        result = self._send_route('AccountHandler.Login', {
+            'LoginID': login_id,
+            'Token': login_token,
+            'Version': versions[-1],
+            'LoginType': 'Erolabs',
+            'IsNewSDK': is_new_sdk,
+        })
+        account_info = result.get('Info') or {}
+        self.aid = oid(account_info.get('_id'))
+        self.session_id = result.get('SessionID')
+        self.cuid = account_info.get('CUID')
+        if not self.aid or not self.session_id or self.cuid is None:
+            raise GameRequestError('登录响应缺少 AID、SessionID 或 CUID')
+        self.bulletin = bulletin
+        self.rank_week = (((result.get('PVPData') or {}).get(
+            'PVPRankInfo') or {}).get('RankWeek'))
+        return result
+
+    def login(self, attempts=3):
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._login_once()
+            except Exception as exc:
+                last_error = exc
+                self.aid = self.session_id = self.cuid = None
+                self.rank_week = None
+                if attempt < attempts:
+                    time.sleep(attempt)
+        raise GameRequestError('连续登录 {} 次失败：{}'.format(
+            attempts, last_error)) from last_error
+
+    def call(self, route, data=None, attempts=3, delay=None,
+             required_key=None):
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                if not self.session_id:
+                    self.login(attempts=3)
+                payload = dict(data or {})
+                payload.update({'AID': self.aid, 'SessionID': self.session_id})
+                result = self._send_route(route, payload, delay=delay)
+                if required_key and required_key not in result:
+                    raise GameRequestError(
+                        '{} 响应缺少 {}'.format(route, required_key))
+                return result
+            except Exception as exc:
+                last_error = exc
+                self.aid = self.session_id = self.cuid = None
+                if attempt < attempts:
+                    self.login(attempts=3)
+        raise GameRequestError(
+            '{} 连续请求 {} 次失败：{}'.format(route, attempts, last_error)
+        ) from last_error
+
+    def call_once(self, route, data=None, delay=None, required_key=None):
+        """Send one request without clearing or refreshing the session."""
+        if not self.session_id:
+            raise GameRequestError('当前没有有效登录会话')
+        payload = dict(data or {})
+        payload.update({'AID': self.aid, 'SessionID': self.session_id})
+        result = self._send_route(route, payload, delay=delay)
+        if required_key and required_key not in result:
+            raise GameRequestError(
+                '{} 响应缺少 {}'.format(route, required_key))
+        return result
+
+
+def query_guild(client, guild_id):
+    return client.call(
+        'GuildHandler.QueryPartialGuildDataForGuildWar',
+        {'GuildID': guild_id},
+        delay=(0.8, 1.2),
+        required_key='GuildData',
+    )
+
+
+def query_full_guild_war_data(client):
+    return client.call(
+        'GuildWarHandler.QueryFullGuildWarData',
+        {},
+        delay=(0.8, 1.2),
+        required_key='GuildWarData',
+    )
+
+
+def query_pvp_rank(client):
+    if client.rank_week is None:
+        raise GameRequestError('登录响应缺少 PVP RankWeek')
+    return client.call(
+        'PVPHandler.GetPVPRankList',
+        {'Week': client.rank_week},
+        delay=(0.8, 1.2),
+        required_key='PVPRankInfoList',
+    )
+
+
+def query_top_guilds(client):
+    rank_data = client.call(
+        'GuildWarHandler.QueryNowGuildWarRank',
+        {},
+        delay=(0.8, 1.2),
+        required_key='GuildWarCampaignInfoList',
+    )
+    ranked = rank_data.get('GuildWarCampaignInfoList') or []
+    guilds = []
+    seen_ids = set()
+    for item in ranked:
+        guild_id = oid((item.get('GuildSubInfo') or {}).get('_id'))
+        if not guild_id or guild_id in seen_ids:
+            continue
+        seen_ids.add(guild_id)
+        guilds.append(query_guild(client, guild_id))
+    if not guilds:
+        raise GameRequestError('团战排行榜前20名中没有可查询的佣兵团')
+    return guilds
+
+
+def search_friend_players(client, query):
+    data = client.call(
+        'FriendHandler.SearchFriendList',
+        {'Name': query},
+        delay=(0.8, 1.2),
+    )
+    players = []
+    seen = set()
+    for player in data.get('FriendInfos') or []:
+        cuid = player.get('CUID')
+        if cuid is None or int(player.get('LV') or 0) <= 60:
+            continue
+        cuid = int(cuid)
+        if cuid in seen:
+            continue
+        seen.add(cuid)
+        players.append(player)
+    return players
+
+
+def query_player_card(client, cuid):
+    return client.call(
+        'AccountHandler.QueryPlayerCardData',
+        {'CUID': int(cuid)},
+        delay=(0.8, 1.2),
+    )
+
+
+def query_member_logs(client, cuid):
+    return client.call(
+        'GuildWarHandler.QueryGuildWarBattleLogListByAccount',
+        {'TargetCUID': int(cuid)},
+        delay=(0.08, 0.12),
+        required_key='SubLogs',
+    )
+
+
+def query_battle_detail(client, battle_id):
+    return client.call_once(
+        'GuildWarHandler.QueryGuildWarBattleLogByID',
+        {'TargetCUID': int(client.cuid), 'TargetID': battle_id},
+        delay=(0.8, 1.2),
+        required_key='Logs',
+    )

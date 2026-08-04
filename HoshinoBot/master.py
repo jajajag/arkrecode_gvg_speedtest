@@ -1,7 +1,6 @@
 from collections import defaultdict
 from pathlib import Path
 from urllib.parse import urlparse
-import json
 import re
 import sqlite3
 import tempfile
