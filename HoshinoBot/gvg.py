@@ -926,22 +926,11 @@ def _current_members(conn):
     ).fetchall()
 
 
-def _avatar_tokens(role_id, roles, aliases):
-    tokens = {role_id, roles.get(role_id, role_id)}
-    canonical = _fold(roles.get(role_id, role_id))
-    for alias, value in aliases.items():
-        if _fold(value) == canonical:
-            tokens.add(str(alias))
-    return {token for token in tokens if token}
-
-
-def _player_options(rows, roles, aliases):
-    result = []
-    for row in rows:
-        avatar_name = roles.get(row['avatar_role_id'], row['avatar_role_id'])
-        tokens = _avatar_tokens(row['avatar_role_id'], roles, aliases)
-        result.append((row, avatar_name, tokens))
-    return result
+def _ambiguous_players(rows):
+    lines = ['发现同名玩家：']
+    lines.extend('{}. {} {}'.format(index, row['name'], row['cuid'])
+                 for index, row in enumerate(rows, 1))
+    return '\n'.join(lines)
 
 
 def resolve_player(query, conn=None):
@@ -949,46 +938,27 @@ def resolve_player(query, conn=None):
     conn = conn or connect_data()
     try:
         rows = _current_members(conn)
-        roles = _role_name_map()
-        aliases = load_aliases()
-        options = _player_options(rows, roles, aliases)
+        query = str(query).strip()
+        if re.fullmatch(r'\d{9}', query):
+            by_cuid = [row for row in rows if str(row['cuid']) == query]
+            if by_cuid:
+                return by_cuid[0], None
+            return None, '没有找到玩家ID“{}”。'.format(query)
+
         query_folded = _fold(query)
-
-        exact_name = [item for item in options
-                      if _fold(item[0]['name']) == query_folded]
+        exact_name = [row for row in rows
+                      if _fold(row['name']) == query_folded]
         if len(exact_name) == 1:
-            return exact_name[0][0], None
+            return exact_name[0], None
+        if len(exact_name) > 1:
+            return None, _ambiguous_players(exact_name)
 
-        qualified = []
-        for row, _, tokens in options:
-            for token in tokens:
-                labels = (str(row['name']) + token,
-                          str(row['name']) + ' ' + token)
-                if any(_fold(label) == query_folded for label in labels):
-                    qualified.append(row)
-                    break
-        unique = {int(row['cuid']): row for row in qualified}
-        if len(unique) == 1:
-            return next(iter(unique.values())), None
-
-        if len(exact_name) > 1 or len(unique) > 1:
-            ambiguous = exact_name or list(unique.values())
-            labels = '、'.join('{}{}'.format(
-                row['name'], roles.get(row['avatar_role_id'],
-                                       row['avatar_role_id']))
-                for row in ambiguous)
-            return None, '玩家有重名，请加头像角色名：{}'.format(labels)
-
-        partial = [item[0] for item in options
-                   if query_folded in _fold(item[0]['name'])]
+        partial = [row for row in rows
+                   if query_folded in _fold(row['name'])]
         if len(partial) == 1:
             return partial[0], None
         if len(partial) > 1:
-            labels = '、'.join('{}{}'.format(
-                row['name'], roles.get(row['avatar_role_id'],
-                                       row['avatar_role_id']))
-                for row in partial)
-            return None, '玩家名匹配到多人，请加头像角色名：{}'.format(labels)
+            return None, _ambiguous_players(partial)
         return None, '没有找到玩家“{}”。'.format(query)
     finally:
         if close_conn:
@@ -1199,7 +1169,7 @@ def set_first_speed(player_query, speed, db_path=DATA_DB_PATH):
 def _resolve_player_prefix(text, conn):
     tokens = text.strip().split()
     if len(tokens) < 2:
-        return None, None, '格式：团战 信息 玩家名 信息内容'
+        return None, None, '格式：团战 信息 玩家名或UID 信息内容'
     errors = []
     for split_at in range(len(tokens) - 1, 0, -1):
         query = ' '.join(tokens[:split_at])
@@ -1311,9 +1281,9 @@ GVG_HELP = (
     '团战 作业 角色1 角色2 角色3\n'
     '团战 防守\n'
     '团战 胜率表\n'
-    '团战 一速 玩家名 速度\n'
-    '团战 信息 玩家名 内容\n'
-    '团战 玩家名（重名加头像名）\n'
+    '团战 一速 玩家名或UID 速度\n'
+    '团战 信息 玩家名或UID 内容\n'
+    '团战 玩家名或UID\n'
     '团战 更新数据（仅限Bot主）'
 )
 
@@ -1395,7 +1365,7 @@ def register_gvg(service):
             content = raw[len('一速'):].strip()
             match = re.fullmatch(r'(.+?)\s+(\d{1,4}(?:-\d{1,4})?)', content)
             if not match:
-                message = '格式：团战 一速 玩家名 227（或265-270）'
+                message = '格式：团战 一速 玩家名或UID 227（或265-270）'
             else:
                 try:
                     message = set_first_speed(match.group(1), match.group(2))
