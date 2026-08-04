@@ -11,7 +11,7 @@ from pathlib import Path
 
 import requests
 
-from .xiyan_master import update_master_db
+from .gvg_master import update_master_db
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -102,12 +102,47 @@ def connect_data(path=DATA_DB_PATH):
     return conn
 
 
+def _migrate_legacy_tables(conn):
+    legacy_tables = (
+        ('xiyan_members', 'gvg_members', (
+            'cuid', 'name', 'avatar_role_id', 'first_speed',
+            'info', 'info_date', 'updated_at',
+        )),
+        ('xiyan_defenses', 'gvg_defenses', (
+            'cuid', 'snapshot_date', 'sort_order',
+        )),
+        ('xiyan_defense_units', 'gvg_defense_units', (
+            'cuid', 'half', 'pos', 'role_id',
+        )),
+        ('xiyan_meta', 'gvg_meta', ('key', 'value')),
+    )
+    existing = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    for legacy, current, columns in legacy_tables:
+        if legacy not in existing:
+            continue
+        if current not in existing:
+            conn.execute('ALTER TABLE "{}" RENAME TO "{}"'.format(
+                legacy, current))
+            existing.remove(legacy)
+            existing.add(current)
+            continue
+        column_sql = ', '.join(columns)
+        conn.execute(
+            'INSERT OR IGNORE INTO "{}" ({}) '
+            'SELECT {} FROM "{}"'.format(
+                current, column_sql, column_sql, legacy))
+
+
 def init_database(path=DATA_DB_PATH):
     conn = connect_data(path)
     try:
+        _migrate_legacy_tables(conn)
         conn.executescript(
             '''
-            CREATE TABLE IF NOT EXISTS xiyan_members (
+            CREATE TABLE IF NOT EXISTS gvg_members (
                 cuid INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 avatar_role_id TEXT,
@@ -116,13 +151,13 @@ def init_database(path=DATA_DB_PATH):
                 info_date TEXT,
                 updated_at INTEGER NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS xiyan_defenses (
+            CREATE TABLE IF NOT EXISTS gvg_defenses (
                 cuid INTEGER PRIMARY KEY,
                 snapshot_date TEXT NOT NULL,
                 sort_order INTEGER NOT NULL,
-                FOREIGN KEY (cuid) REFERENCES xiyan_members(cuid)
+                FOREIGN KEY (cuid) REFERENCES gvg_members(cuid)
             );
-            CREATE TABLE IF NOT EXISTS xiyan_defense_units (
+            CREATE TABLE IF NOT EXISTS gvg_defense_units (
                 cuid INTEGER NOT NULL,
                 half INTEGER NOT NULL,
                 pos INTEGER NOT NULL,
@@ -154,7 +189,7 @@ def init_database(path=DATA_DB_PATH):
                 dead INTEGER NOT NULL,
                 PRIMARY KEY (battle_id, round_idx, side, pos)
             );
-            CREATE TABLE IF NOT EXISTS xiyan_meta (
+            CREATE TABLE IF NOT EXISTS gvg_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
@@ -173,13 +208,13 @@ def init_database(path=DATA_DB_PATH):
 
 def _meta_get(conn, key):
     row = conn.execute(
-        'SELECT value FROM xiyan_meta WHERE key = ?', (key,)).fetchone()
+        'SELECT value FROM gvg_meta WHERE key = ?', (key,)).fetchone()
     return row['value'] if row else None
 
 
 def _meta_set(conn, key, value):
     conn.execute(
-        'INSERT INTO xiyan_meta(key, value) VALUES (?, ?) '
+        'INSERT INTO gvg_meta(key, value) VALUES (?, ?) '
         'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
         (key, str(value)),
     )
@@ -353,50 +388,19 @@ def validate_guild_name(guild_data, expected_name):
                 actual_name, expected_name))
 
 
-def _team_units(team):
-    role_map = (team or {}).get('PositionRoleMap') or {}
-    units = []
-    for pos, role in role_map.items():
-        role_id = (role or {}).get('StaticID')
-        if role_id:
-            units.append((int(pos), str(role_id)))
-    return sorted(units)
-
-
-def parse_defense_members(guild_data):
-    result = []
-    for order, member in enumerate(guild_members(guild_data), 1):
-        player = member.get('PlayerInfo') or {}
-        defense = member.get('DefenceTeamData') or {}
-        cuid = player.get('CUID')
-        first = _team_units(defense.get('FirstTeam'))
-        second = _team_units(defense.get('SecondTeam'))
-        if cuid is None or len(first) != 3 or len(second) != 3:
-            continue
-        result.append({
-            'cuid': int(cuid),
-            'name': str(player.get('Name') or cuid),
-            'avatar_role_id': str(player.get('LeaderSID') or ''),
-            'order': order,
-            'first': first,
-            'second': second,
-        })
-    return result
-
-
 def replace_defenses(members, db_path=DATA_DB_PATH, snapshot_date=None):
     init_database(db_path)
     snapshot_date = snapshot_date or _today()
     conn = connect_data(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
-        conn.execute('UPDATE xiyan_members SET info=NULL, info_date=NULL')
-        conn.execute('DELETE FROM xiyan_defense_units')
-        conn.execute('DELETE FROM xiyan_defenses')
+        conn.execute('UPDATE gvg_members SET info=NULL, info_date=NULL')
+        conn.execute('DELETE FROM gvg_defense_units')
+        conn.execute('DELETE FROM gvg_defenses')
         for member in members:
             conn.execute(
                 '''
-                INSERT INTO xiyan_members(
+                INSERT INTO gvg_members(
                     cuid, name, avatar_role_id, updated_at
                 ) VALUES (?, ?, ?, ?)
                 ON CONFLICT(cuid) DO UPDATE SET
@@ -408,13 +412,13 @@ def replace_defenses(members, db_path=DATA_DB_PATH, snapshot_date=None):
                  member['avatar_role_id'], _now_ms()),
             )
             conn.execute(
-                'INSERT INTO xiyan_defenses(cuid, snapshot_date, sort_order) '
+                'INSERT INTO gvg_defenses(cuid, snapshot_date, sort_order) '
                 'VALUES (?, ?, ?)',
                 (member['cuid'], snapshot_date, member['order']),
             )
             for half, key in ((1, 'first'), (2, 'second')):
                 conn.executemany(
-                    'INSERT INTO xiyan_defense_units('
+                    'INSERT INTO gvg_defense_units('
                     'cuid, half, pos, role_id) VALUES (?, ?, ?, ?)',
                     [(member['cuid'], half, pos, role_id)
                      for pos, role_id in member[key]],
@@ -431,7 +435,7 @@ def clear_member_info(db_path=DATA_DB_PATH):
     init_database(db_path)
     conn = connect_data(db_path)
     try:
-        conn.execute('UPDATE xiyan_members SET info=NULL, info_date=NULL')
+        conn.execute('UPDATE gvg_members SET info=NULL, info_date=NULL')
         conn.commit()
     finally:
         conn.close()
@@ -543,6 +547,98 @@ def parse_battle_detail(data):
     return rows
 
 
+def _defense_from_rows(rows, cuid):
+    rounds = sorted(
+        (row for row in rows if int(row['def_cuid']) == int(cuid)),
+        key=lambda row: int(row['round_idx']),
+    )
+    if len(rounds) < 2:
+        return None
+    teams = []
+    for row in rounds[:2]:
+        team = sorted(
+            ((int(unit['pos']), str(unit['role_id']))
+             for unit in row['def_team'] if unit.get('role_id')),
+            key=lambda unit: unit[0],
+        )
+        if len(team) != 3:
+            return None
+        teams.append(team)
+    return {'first': teams[0], 'second': teams[1]}
+
+
+def _defense_log_candidates(logs, cuid, guild_name):
+    candidates = {}
+    for item in logs.get('SubLogs') or []:
+        defender = item.get('DefenderPlayerInfo') or {}
+        defender_guild = (defender.get('GuildSubInfo') or {}).get('Name', '')
+        if int(defender.get('CUID') or -1) != int(cuid):
+            continue
+        if defender_guild != guild_name:
+            continue
+        battle_id = _oid(item.get('_id'))
+        if not battle_id:
+            continue
+        start_ts = int(((item.get('StartTime') or {}).get('$date')) or 0)
+        previous = candidates.get(battle_id)
+        if previous is None or start_ts > previous[0]:
+            candidates[battle_id] = (start_ts, battle_id, item)
+    return sorted(
+        candidates.values(), key=lambda candidate: candidate[0], reverse=True)
+
+
+def collect_defense_members(client, guild_data, guild_name):
+    """Fetch a fresh defense snapshot from every member's live SubLogs."""
+    roster = []
+    for order, member in enumerate(guild_members(guild_data), 1):
+        player = member.get('PlayerInfo') or {}
+        cuid = player.get('CUID')
+        if cuid is None:
+            continue
+        logs = query_member_logs(client, cuid)
+        candidates = _defense_log_candidates(logs, cuid, guild_name)
+        roster.append((order, player, candidates))
+
+    result = []
+    consecutive_failures = 0
+    for order, player, candidates in roster:
+        cuid = int(player['CUID'])
+        selected = None
+        selected_log = None
+        for _, battle_id, sublog in candidates:
+            try:
+                detail = query_battle_detail(client, battle_id)
+            except Exception:
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    client.login(attempts=3)
+                    consecutive_failures = 0
+                continue
+            consecutive_failures = 0
+            try:
+                rows = parse_battle_detail(detail)
+            except Exception:
+                continue
+            selected = _defense_from_rows(rows, cuid)
+            if selected:
+                selected_log = sublog
+                break
+
+        if not selected:
+            continue
+        defender = (selected_log or {}).get('DefenderPlayerInfo') or {}
+        result.append({
+            'cuid': cuid,
+            'name': str(player.get('Name') or defender.get('Name') or cuid),
+            'avatar_role_id': str(
+                player.get('LeaderSID') or defender.get('LeaderSID') or ''),
+            'order': order,
+            'first': selected['first'],
+            'second': selected['second'],
+        })
+    return result
+
+
 def save_battle_rows(rows, db_path=DATA_DB_PATH):
     if not rows:
         return False
@@ -625,7 +721,7 @@ def update_mutual_battles(client, guild_data_list, config,
     consecutive_failures = 0
     for battle_id in sorted(set(refs) - known_ids):
         try:
-            rows = parse_battle_detail(query_battle_detail(client, battle_id))
+            detail = query_battle_detail(client, battle_id)
         except Exception:
             consecutive_failures += 1
             if consecutive_failures >= 3:
@@ -633,6 +729,10 @@ def update_mutual_battles(client, guild_data_list, config,
                 consecutive_failures = 0
             continue
         consecutive_failures = 0
+        try:
+            rows = parse_battle_detail(detail)
+        except Exception:
+            continue
         if {rows[0]['atk_guild'], rows[0]['def_guild']} != set(guild_names):
             continue
         if save_battle_rows(rows, db_path):
@@ -714,9 +814,11 @@ def update_all_sync(mode=None):
         target = query_guild(client, config['target_guild_id'])
         validate_guild_name(target, config['target_guild_name'])
         guild_data['target'] = target
-        members = parse_defense_members(target)
+        members = collect_defense_members(
+            client, target, config['target_guild_name'])
         if not members:
-            raise GameRequestError('目标团没有解析到完整的团战防守阵容')
+            raise GameRequestError(
+                '目标团成员的 SubLogs 中没有解析到可用的两队防守阵容')
         replace_defenses(members)
         result['defenses'] = len(members)
 
@@ -745,7 +847,7 @@ def load_aliases(path=ALIAS_PATH):
 
 def load_roles(path=MASTER_DB_PATH):
     if not Path(path).is_file():
-        raise RuntimeError('找不到 master.db，请先发送“夕颜若雪 更新数据”。')
+        raise RuntimeError('找不到 master.db，请先发送“团战 更新数据”。')
     conn = sqlite3.connect(str(path))
     try:
         rows = conn.execute(
@@ -817,8 +919,8 @@ def _current_members(conn):
     return conn.execute(
         '''
         SELECT m.*, d.snapshot_date, d.sort_order
-        FROM xiyan_defenses AS d
-        JOIN xiyan_members AS m ON m.cuid = d.cuid
+        FROM gvg_defenses AS d
+        JOIN gvg_members AS m ON m.cuid = d.cuid
         ORDER BY d.sort_order, m.cuid
         '''
     ).fetchall()
@@ -969,7 +1071,7 @@ def format_solutions(role_ids, db_path=DATA_DB_PATH):
 def _defense_units(conn):
     units = defaultdict(lambda: {1: [], 2: []})
     for row in conn.execute(
-        'SELECT * FROM xiyan_defense_units ORDER BY cuid, half, pos'):
+        'SELECT * FROM gvg_defense_units ORDER BY cuid, half, pos'):
         units[int(row['cuid'])][int(row['half'])].append(row['role_id'])
     return units
 
@@ -1060,7 +1162,7 @@ def set_first_speed(player_query, speed, db_path=DATA_DB_PATH):
         if error:
             return error
         conn.execute(
-            'UPDATE xiyan_members SET first_speed=?, updated_at=? WHERE cuid=?',
+            'UPDATE gvg_members SET first_speed=?, updated_at=? WHERE cuid=?',
             (normalized, _now_ms(), int(player['cuid'])),
         )
         conn.commit()
@@ -1072,7 +1174,7 @@ def set_first_speed(player_query, speed, db_path=DATA_DB_PATH):
 def _resolve_player_prefix(text, conn):
     tokens = text.strip().split()
     if len(tokens) < 2:
-        return None, None, '格式：夕颜若雪 信息 玩家名 信息内容'
+        return None, None, '格式：团战 信息 玩家名 信息内容'
     errors = []
     for split_at in range(len(tokens) - 1, 0, -1):
         query = ' '.join(tokens[:split_at])
@@ -1094,7 +1196,7 @@ def set_member_info(text, db_path=DATA_DB_PATH, weekday=None):
         if error:
             return error
         conn.execute(
-            'UPDATE xiyan_members SET info=?, info_date=?, updated_at=? '
+            'UPDATE gvg_members SET info=?, info_date=?, updated_at=? '
             'WHERE cuid=?',
             (info, _today(), _now_ms(), int(player['cuid'])),
         )
@@ -1135,7 +1237,7 @@ def update_result_text(result):
     parts.append('别名 {} 条'.format(result['aliases']))
     parts.append('master.db {}'.format(
         '已更新' if result['master_changed'] else '无需更新'))
-    text = '夕颜若雪数据更新完成：' + '，'.join(parts)
+    text = '团战数据更新完成：' + '，'.join(parts)
     if result['warnings']:
         text += '\n' + '\n'.join(result['warnings'])
     return text
@@ -1158,33 +1260,36 @@ async def report_to_superuser(message):
     )
 
 
-async def run_update_job(service, mode, bot=None, ev=None):
+async def run_update_job(service, mode, bot=None, ev=None,
+                         notify_superuser=True):
     try:
         result = await asyncio.to_thread(update_all_sync, mode)
         message = update_result_text(result)
-        for warning in result['warnings']:
-            await report_to_superuser('夕颜若雪更新警告：\n' + warning)
+        if notify_superuser:
+            for warning in result['warnings']:
+                await report_to_superuser('团战更新警告：\n' + warning)
         if bot is not None and ev is not None:
             await bot.send(ev, message, at_sender=True)
         else:
             service.logger.info(message)
     except Exception as exc:
         service.logger.exception(exc)
-        message = '夕颜若雪数据更新失败：\n{}'.format(exc)
+        message = '团战数据更新失败：\n{}'.format(exc)
         if bot is not None and ev is not None:
             await bot.send(ev, message, at_sender=True)
-        await report_to_superuser(message)
+        if notify_superuser:
+            await report_to_superuser(message)
 
 
-XIYAN_HELP = (
-    '夕颜若雪指令：\n'
-    '夕颜若雪 团战作业 角色1 角色2 角色3\n'
-    '夕颜若雪 防守\n'
-    '夕颜若雪 胜率表\n'
-    '夕颜若雪 一速 玩家名 227（或265-270）\n'
-    '夕颜若雪 信息 玩家名 信息内容\n'
-    '夕颜若雪 玩家名（重名时在名字后加头像角色名）\n'
-    '夕颜若雪 更新数据（仅限机器人主人）'
+GVG_HELP = (
+    '团战指令：\n'
+    '团战 作业 角色1 角色2 角色3\n'
+    '团战 防守\n'
+    '团战 胜率表\n'
+    '团战 一速 玩家名 227（或265-270）\n'
+    '团战 信息 玩家名 信息内容\n'
+    '团战 玩家名（重名时在名字后加头像角色名）\n'
+    '团战 更新数据（仅限机器人主人）'
 )
 
 
@@ -1199,7 +1304,7 @@ def _format_query_reply(message):
 _REGISTERED = False
 
 
-def register_xiyan(service):
+def register_gvg(service):
     global _REGISTERED
     if _REGISTERED:
         return
@@ -1208,19 +1313,21 @@ def register_xiyan(service):
 
     @service.scheduled_job('cron', day_of_week='mon,wed,fri', hour=8,
                            minute=5)
-    async def xiyan_update_defenses():
+    async def gvg_update_defenses():
         await run_update_job(service, 'defense')
 
     @service.scheduled_job('cron', day_of_week='tue,thu,sat', hour=8,
                            minute=5)
-    async def xiyan_update_battles():
+    async def gvg_update_battles():
         await run_update_job(service, 'battles')
 
-    @service.on_prefix('夕颜若雪')
-    async def xiyan_command(bot, ev):
+    @service.on_prefix('团战')
+    async def gvg_command(bot, ev):
         raw = ev.message.extract_plain_text().strip()
+        if raw.startswith(('测速', '总结')):
+            return
         if not raw:
-            await bot.send(ev, '\n' + XIYAN_HELP, at_sender=True)
+            await bot.send(ev, '\n' + GVG_HELP, at_sender=True)
             return
 
         if raw == '更新数据':
@@ -1229,8 +1336,9 @@ def register_xiyan(service):
                 await bot.send(ev, '只有机器人主人可以强制更新数据。',
                                at_sender=True)
                 return
-            await bot.send(ev, '开始更新夕颜若雪数据，请稍候。', at_sender=True)
-            await run_update_job(service, 'both', bot, ev)
+            await bot.send(ev, '开始更新团战数据，请稍候。', at_sender=True)
+            await run_update_job(
+                service, 'both', bot, ev, notify_superuser=False)
             return
 
         if raw == '防守':
@@ -1249,10 +1357,10 @@ def register_xiyan(service):
             await bot.send(ev, _format_query_reply(message), at_sender=False)
             return
 
-        if raw.startswith('团战作业'):
-            queries = raw[len('团战作业'):].strip().split()
+        if raw.startswith('作业'):
+            queries = raw[len('作业'):].strip().split()
             if len(queries) != 3:
-                message = '格式：夕颜若雪 团战作业 角色1 角色2 角色3'
+                message = '格式：团战 作业 角色1 角色2 角色3'
             else:
                 try:
                     role_ids, error = resolve_roles(queries)
@@ -1266,7 +1374,7 @@ def register_xiyan(service):
             content = raw[len('一速'):].strip()
             match = re.fullmatch(r'(.+?)\s+(\d{1,4}(?:-\d{1,4})?)', content)
             if not match:
-                message = '格式：夕颜若雪 一速 玩家名 227（或265-270）'
+                message = '格式：团战 一速 玩家名 227（或265-270）'
             else:
                 try:
                     message = set_first_speed(match.group(1), match.group(2))

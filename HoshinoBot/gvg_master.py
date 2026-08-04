@@ -236,7 +236,7 @@ def update_master_db(bulletin, output_path, current_catalog=None,
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
-            prefix='xiyan-master-', dir=str(output_path.parent)) as temp_dir:
+            prefix='gvg-master-', dir=str(output_path.parent)) as temp_dir:
         temp_dir = Path(temp_dir)
         bundles = []
         for index, url in enumerate(urls, 1):

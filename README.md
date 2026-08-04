@@ -58,8 +58,8 @@ hoshino/modules/ark_recode_gvg_speedtest/
 └─ HoshinoBot/
    ├─ __init__.py
    ├─ speed.py
-   ├─ xiyan.py
-   ├─ xiyan_master.py
+   ├─ gvg.py
+   ├─ gvg_master.py
    └─ data/
       └─ account_example.json
 ```
@@ -72,7 +72,7 @@ hoshino/modules/ark_recode_gvg_speedtest/
 
 重启 HoshinoBot 后，发送 `团战测速` 或 `帮助团战测速` 查看用法。
 
-夕颜若雪团战模块还需要安装：
+团战数据模块还需要安装：
 
 ```text
 pip install requests UnityPy
@@ -91,15 +91,15 @@ GID/团名。`account.json`、运行时数据库、角色别名和 `master.db` �
 可用指令：
 
 ```text
-夕颜若雪 团战作业 角色1 角色2 角色3
-夕颜若雪 防守
-夕颜若雪 胜率表
-夕颜若雪 一速 玩家名 227
-夕颜若雪 一速 玩家名 265-270
-夕颜若雪 信息 玩家名 备注内容
-夕颜若雪 玩家名
-夕颜若雪 玩家名头像角色
-夕颜若雪 更新数据
+团战 作业 角色1 角色2 角色3
+团战 防守
+团战 胜率表
+团战 一速 玩家名 227
+团战 一速 玩家名 265-270
+团战 信息 玩家名 备注内容
+团战 玩家名
+团战 玩家名头像角色
+团战 更新数据
 ```
 
 其中“更新数据”仅限机器人主人，每次手动更新都会同时刷新防守和互打记录。
