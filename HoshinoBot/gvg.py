@@ -1089,19 +1089,23 @@ def format_defenses(db_path=DATA_DB_PATH):
         return '暂无防守数据，请先更新。'
     roles = _role_name_map()
     date = members[0]['snapshot_date']
-    lines = ['{} {}防守'.format(date, config['target_guild_name'])]
+    title = '{} {}防守'.format(date, config['target_guild_name'])
+    blocks = []
     for index, member in enumerate(members, 1):
         avatar = roles.get(member['avatar_role_id'], member['avatar_role_id'])
         first = '+'.join(roles.get(role, role)
                          for role in units[int(member['cuid'])][1]) or '-'
         second = '+'.join(roles.get(role, role)
                           for role in units[int(member['cuid'])][2]) or '-'
-        lines.append('{:02d}. {}（{}） 上半：{}；下半：{}'.format(
-            index, member['name'], avatar, first, second))
-    return '\n'.join(lines)
+        blocks.append('\n\n'.join((
+            '{:02d}. {}（{}）'.format(index, member['name'], avatar),
+            '上半：{}'.format(first),
+            '下半：{}'.format(second),
+        )))
+    return title + '\n\n' + '\n\n'.join(blocks)
 
 
-def member_defense_rate(conn, cuid, our_guild_name):
+def member_defense_stats(conn, cuid, our_guild_name):
     since_ts = _now_ms() - RECENT_DAYS * MILLIS_PER_DAY
     row = conn.execute(
         '''
@@ -1113,8 +1117,15 @@ def member_defense_rate(conn, cuid, our_guild_name):
         (since_ts, int(cuid), our_guild_name),
     ).fetchone()
     if not row or not row['total']:
+        return 0, 0
+    return int(row['successes'] or 0), int(row['total'])
+
+
+def member_defense_rate(conn, cuid, our_guild_name):
+    successes, total = member_defense_stats(conn, cuid, our_guild_name)
+    if not total:
         return '-'
-    return '{:.1f}%'.format(int(row['successes'] or 0) / row['total'] * 100)
+    return '{:.1f}%'.format(successes / total * 100)
 
 
 def format_win_rates(db_path=DATA_DB_PATH):
@@ -1126,15 +1137,26 @@ def format_win_rates(db_path=DATA_DB_PATH):
         if not members:
             return '暂无防守数据，请先更新。'
         roles = _role_name_map()
+        ranked = []
+        for member in members:
+            successes, total = member_defense_stats(
+                conn, member['cuid'], config['our_guild_name'])
+            rate = successes / total * 100 if total else None
+            ranked.append((member, rate, total))
+        ranked.sort(key=lambda item: (
+            item[1] is None,
+            -(item[1] or 0),
+            -item[2],
+            int(item[0]['sort_order']),
+        ))
         lines = ['{} {}防守胜率'.format(
             members[0]['snapshot_date'], config['target_guild_name'])]
-        for index, member in enumerate(members, 1):
+        for index, (member, rate, _) in enumerate(ranked, 1):
             avatar = roles.get(member['avatar_role_id'],
                                member['avatar_role_id'])
-            rate = member_defense_rate(
-                conn, member['cuid'], config['our_guild_name'])
+            rate_text = '-' if rate is None else '{:.1f}%'.format(rate)
             lines.append('{:02d}. {}（{}）{}'.format(
-                index, member['name'], avatar, rate))
+                index, member['name'], avatar, rate_text))
         return '\n'.join(lines)
     finally:
         conn.close()
@@ -1294,11 +1316,7 @@ GVG_HELP = (
 
 
 def _format_query_reply(message):
-    no_leading_newline = (
-        message.startswith('查询失败：')
-        or message == '暂无防守数据，请先更新。'
-    )
-    return message if no_leading_newline else '\n' + message
+    return str(message).lstrip('\r\n')
 
 
 _REGISTERED = False
@@ -1327,7 +1345,7 @@ def register_gvg(service):
         if raw.startswith(('测速', '总结')):
             return
         if not raw:
-            await bot.send(ev, '\n' + GVG_HELP, at_sender=True)
+            await bot.send(ev, GVG_HELP, at_sender=True)
             return
 
         if raw == '更新数据':

@@ -65,7 +65,7 @@ async def speed_test(bot, ev: CQEvent):
     raw = ev.message.extract_plain_text()
     # Output instructions if no text is provided
     if not raw.strip():
-        await bot.finish(ev, '\n' + sv_help, at_sender=True)
+        await bot.finish(ev, sv_help, at_sender=True)
     # Parse the input tokens
     try:
         allies, enemies = _parse_tokens_test(raw)
@@ -79,11 +79,11 @@ async def speed_test(bot, ev: CQEvent):
     for (enemy, enemy_min, enemy_max, mean, med, mode_int, ally_min) in ret:
         enemy = enemy[0]
         lines.append(
-            f'\n- {enemy}：速度区间[{enemy_min:.1f}, {enemy_max:.1f}]，'
+            f'- {enemy}：速度区间[{enemy_min:.1f}, {enemy_max:.1f}]，'
             f'MC均值{mean:.1f}，中位数{med:.1f}，最可能速度{mode_int:.0f}，'
             f'稳定超车速度{ally_min:.1f}'
         )
-    msg = ''.join(lines)
+    msg = '\n'.join(lines)
     await bot.send(ev, msg, at_sender=True)
 
 def _parse_tokens_summary(text: str):
@@ -129,7 +129,7 @@ def _parse_tokens_summary(text: str):
 async def speed_summary(bot, ev: CQEvent):
     raw = ev.message.extract_plain_text()
     if not raw.strip():
-        await bot.finish(ev, '\n' + sv_help, at_sender=True)
+        await bot.finish(ev, sv_help, at_sender=True)
     try:
         title, allies, enemies = _parse_tokens_summary(raw)
     except Exception:
@@ -160,7 +160,7 @@ async def overtake(bot, ev: CQEvent):
         prob = overtake_prob(v1, v2)
         percent = round(prob * 100, 2)
         await bot.send(ev,
-            f'\n乱速的概率为：{percent}%', at_sender=True)
+            f'乱速的概率为：{percent}%', at_sender=True)
     except Exception as e:
         await bot.send(ev, f'计算错误，请检查输入数值是否正确', at_sender=True)
 
