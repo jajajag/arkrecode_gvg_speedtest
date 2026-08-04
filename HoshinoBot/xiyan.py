@@ -1189,7 +1189,11 @@ XIYAN_HELP = (
 
 
 def _format_query_reply(message):
-    return message if message.startswith('查询失败：') else '\n' + message
+    no_leading_newline = (
+        message.startswith('查询失败：')
+        or message == '暂无防守数据，请先更新。'
+    )
+    return message if no_leading_newline else '\n' + message
 
 
 _REGISTERED = False
@@ -1226,7 +1230,7 @@ def register_xiyan(service):
                                at_sender=True)
                 return
             await bot.send(ev, '开始更新夕颜若雪数据，请稍候。', at_sender=True)
-            await run_update_job(service, None, bot, ev)
+            await run_update_job(service, 'both', bot, ev)
             return
 
         if raw == '防守':
