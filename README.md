@@ -49,70 +49,41 @@ pyinstaller -F Frida/speed.py --collect-all frida --collect-all UnityPy --clean 
 
 ## HoshinoBot 插件
 
-将仓库根目录的 `__init__.py` 和整个 `HoshinoBot/` 目录复制到 HoshinoBot
-的模块目录，并将模块目录命名为 `ark_recode_gvg_speedtest`：
+### 安装
 
-```text
-hoshino/modules/ark_recode_gvg_speedtest/
-├─ __init__.py
-└─ HoshinoBot/
-   ├─ __init__.py
-   ├─ speed.py
-   ├─ gvg.py
-   ├─ api.py
-   ├─ database.py
-   ├─ updater.py
-   ├─ queries.py
-   ├─ master.py
-   └─ data/
-      └─ account_example.json
+1. 在HoshinoBot的插件目录modules下clone本项目
+
+```
+git clone https://github.com/jajajag/arkrecode_gvg_speedtest
 ```
 
-然后在 `config/__bot__.py` 的模块列表中加入：
+2. 在 `config/__bot__.py` 的模块列表中加入 `ark_recode_gvg_speedtest`
 
-```python
-'ark_recode_gvg_speedtest'
+3. 安装 UnityPy
+
 ```
-
-重启 HoshinoBot 后，发送 `团战测速` 或 `帮助团战测速` 查看用法。
-
-团战数据模块还需要安装：
-
-```text
 pip install requests UnityPy
 ```
 
-复制 `HoshinoBot/data/account_example.json` 为
-`HoshinoBot/data/account.json`，填写一个账号的名称和 Token。团名和团 ID
-会从 `GuildWarData` 自动获取。`account.json`、运行时数据库、角色别名和
-`master.db` 已加入 `.gitignore`，不会被提交。
+4. 复制 `HoshinoBot/data/account_example.json` 为 `HoshinoBot/data/account.json` 并填写账号 Token。
 
-机器人每天 08:05 查询 `GuildWarData`。存在敌方阵营时，直接用响应中的防守
-阵容整表重建当前敌方团防守；只有我方阵营时，保留上次防守，并更新 PVP
-装备和团战排行榜前 20 团的历史战斗。两种更新都会检查 `master.db` 并下载
-角色别名表。下载 catalog 和 bundle 时只使用临时目录，构建结束后只保留
-`master.db`。
+5. 重启 HoshinoBot 后，发送 `团战测速` 或 `帮助团战测速` 查看用法。
 
-可用指令：
+### 可用指令
+
+团战示例：
 
 ```text
 团战 作业 角色1 角色2 角色3
 团战 防守
 团战 胜率表
-团战 一速 玩家名 227
-团战 一速 玩家名 265-270
+团战 一速 玩家名 227 | 265-270
 团战 信息 玩家名 备注内容
 团战 玩家名
-团战 更新数据
+团战 更新数据（仅限Bot主）
 ```
 
-其中“更新数据”仅限机器人主人，手动更新与当天 08:05 的自动更新使用同一套
-分支逻辑。作业查询在最近 30 天找不到当前双方团的解法时，会自动改用所有团
-的进攻记录，最多显示 10 组解法。“一速”可以匹配历次防守中出现过的成员；
-胜率表在我方最近 30 天没有进攻过当前敌方团时，会提示并改用所有团对该敌方
-团的进攻记录计算整体防守胜率。
-
-示例：
+团战测速示例：
 
 ```text
 团战测速
@@ -157,3 +128,4 @@ pip install requests UnityPy
 - [异变的猫娘](https://space.bilibili.com/3546901544700020) 的团战测速 [教学视频](https://www.bilibili.com/video/BV1EcbRzGEz5)
 - [HoshinoBot](https://github.com/Ice9Coffee/HoshinoBot)
 - [ArkRecodetools](https://github.com/zzasqas/ArkRecodetools/blob/main/guild-battle.html)
+- [openrubi](https://github.com/StardustChocolate/openrubi) 的角色别名表
