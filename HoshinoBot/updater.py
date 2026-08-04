@@ -30,7 +30,7 @@ from .database import (
 )
 from .master import update_master_db
 
-
+# Borrowed from StardustChocolate/openrubi
 ALIAS_URL = (
     'https://github.com/StardustChocolate/openrubi/raw/refs/heads/main/'
     'arkrecode/members/character_dic.json'
