@@ -1,4 +1,10 @@
 {
-  "Name": "玩家昵称",
-  "Token": "请填写 accounts.json 中单个账号的 Token"
+  "MainAccount": {
+    "Name": "大号玩家昵称",
+    "Token": "请填写大号 Token"
+  },
+  "SubAccount": {
+    "Name": "小号玩家昵称",
+    "Token": "请填写小号 Token"
+  }
 }

@@ -22,109 +22,10 @@ def now_ms():
 
 def connect_data(path=DATA_DB_PATH):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA busy_timeout = 30000')
     return conn
-
-
-def _table_exists(conn, name):
-    return conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (name,),
-    ).fetchone() is not None
-
-
-def _table_columns(conn, name):
-    return {row['name'] for row in conn.execute(
-        'PRAGMA table_info("{}")'.format(name))}
-
-
-def _migrate_current_schema(conn):
-    if _table_exists(conn, 'gvg_members'):
-        columns = _table_columns(conn, 'gvg_members')
-        if 'first_speed' in columns and 'max_speed' not in columns:
-            conn.execute(
-                'ALTER TABLE gvg_members '
-                'RENAME COLUMN first_speed TO max_speed')
-        elif 'first_speed' in columns and 'max_speed' in columns:
-            conn.execute(
-                'UPDATE gvg_members SET max_speed=COALESCE('
-                'max_speed, first_speed)')
-
-    if _table_exists(conn, 'gvg_meta'):
-        conn.execute(
-            'INSERT OR REPLACE INTO pvp_meta(key, value) '
-            'SELECT key, value FROM gvg_meta')
-        conn.execute('DROP TABLE gvg_meta')
-
-    if _table_exists(conn, 'gvg_defenses'):
-        if _table_exists(conn, 'gvg_defense_units'):
-            conn.execute(
-                '''
-                WITH ranked_units AS (
-                    SELECT cuid, half, role_id,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY cuid, half ORDER BY pos
-                           ) AS slot
-                    FROM gvg_defense_units
-                )
-                INSERT OR REPLACE INTO gvg_defences(
-                    cuid, snapshot_date, sort_order,
-                    upper_1_role_id, upper_2_role_id, upper_3_role_id,
-                    lower_1_role_id, lower_2_role_id, lower_3_role_id
-                )
-                SELECT d.cuid, d.snapshot_date, d.sort_order,
-                       MAX(CASE WHEN u.half=1 AND u.slot=1
-                                THEN u.role_id END),
-                       MAX(CASE WHEN u.half=1 AND u.slot=2
-                                THEN u.role_id END),
-                       MAX(CASE WHEN u.half=1 AND u.slot=3
-                                THEN u.role_id END),
-                       MAX(CASE WHEN u.half=2 AND u.slot=1
-                                THEN u.role_id END),
-                       MAX(CASE WHEN u.half=2 AND u.slot=2
-                                THEN u.role_id END),
-                       MAX(CASE WHEN u.half=2 AND u.slot=3
-                                THEN u.role_id END)
-                FROM gvg_defenses AS d
-                LEFT JOIN ranked_units AS u ON u.cuid=d.cuid
-                GROUP BY d.cuid, d.snapshot_date, d.sort_order
-                ''')
-        else:
-            conn.execute(
-                'INSERT OR REPLACE INTO gvg_defences('
-                'cuid, snapshot_date, sort_order) '
-                'SELECT cuid, snapshot_date, sort_order FROM gvg_defenses')
-
-        if _table_exists(conn, 'gvg_defense_units'):
-            conn.execute('DROP TABLE gvg_defense_units')
-        conn.execute('DROP TABLE gvg_defenses')
-    elif _table_exists(conn, 'gvg_defense_units'):
-        conn.execute('DROP TABLE gvg_defense_units')
-
-    if _table_exists(conn, 'gvg_defences'):
-        columns = _table_columns(conn, 'gvg_defences')
-        if {'guild_id', 'guild_name'} <= columns:
-            enemy_id = conn.execute(
-                "SELECT value FROM pvp_meta "
-                "WHERE key='current_enemy_guild_id'").fetchone()
-            enemy_name = conn.execute(
-                "SELECT value FROM pvp_meta "
-                "WHERE key='current_enemy_guild_name'").fetchone()
-            enemy_id = enemy_id['value'] if enemy_id else ''
-            enemy_name = enemy_name['value'] if enemy_name else ''
-            has_current = conn.execute(
-                'SELECT 1 FROM gvg_defences '
-                'WHERE guild_id=? OR guild_name=? LIMIT 1',
-                (enemy_id, enemy_name),
-            ).fetchone()
-            if has_current:
-                conn.execute(
-                    'DELETE FROM gvg_defences '
-                    "WHERE COALESCE(guild_id, '')<>? "
-                    "AND COALESCE(guild_name, '')<>?",
-                    (enemy_id, enemy_name),
-                )
 
 
 def init_database(path=DATA_DB_PATH):
@@ -209,7 +110,6 @@ def init_database(path=DATA_DB_PATH):
             CREATE INDEX IF NOT EXISTS idx_gvg_units_role
                 ON gvg_units(side, role_id);
             ''')
-        _migrate_current_schema(conn)
         conn.commit()
     finally:
         conn.close()

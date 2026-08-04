@@ -4,10 +4,11 @@ from pathlib import Path
 import requests
 
 from .api import (
-    GameClient,
     GameRequestError,
-    load_config,
+    get_main_game_client,
+    get_sub_game_client,
     oid,
+    query_bulletin,
     query_battle_detail,
     query_full_guild_war_data,
     query_member_logs,
@@ -188,7 +189,7 @@ def update_gvg_battles(client, guild_data_list, db_path=DATA_DB_PATH):
                 detail_failures += 1
                 consecutive_failures += 1
                 if consecutive_failures >= 3:
-                    client.login(attempts=3)
+                    client.login(attempts=3, force=True)
                     consecutive_failures = 0
                 continue
             consecutive_failures = 0
@@ -248,10 +249,9 @@ def update_master(bulletin, http):
 
 def update_all_sync():
     init_database()
-    config = load_config()
-    client = GameClient(config)
-    client.login(attempts=3)
-    full_data = query_full_guild_war_data(client)
+    main_client = get_main_game_client()
+    main_client.login(attempts=3)
+    full_data = query_full_guild_war_data(main_client)
     guild_war = full_data.get('GuildWarData') or {}
     my_camp = guild_war.get('MyCampData') or {}
     enemy_camp = guild_war.get('EnemyCampData')
@@ -263,14 +263,17 @@ def update_all_sync():
     warnings = []
     master_changed = False
     alias_count = 0
-    try:
-        _, master_changed = update_master(client.bulletin, client.http)
-    except Exception as exc:
-        warnings.append('master.db 更新失败：{}'.format(exc))
-    try:
-        alias_count = update_aliases(session=client.http)
-    except Exception as exc:
-        warnings.append('角色别名表下载失败：{}'.format(exc))
+    with requests.Session() as download_session:
+        try:
+            bulletin = query_bulletin(download_session)
+            _, master_changed = update_master(
+                bulletin, download_session)
+        except Exception as exc:
+            warnings.append('master.db 更新失败：{}'.format(exc))
+        try:
+            alias_count = update_aliases(session=download_session)
+        except Exception as exc:
+            warnings.append('角色别名表下载失败：{}'.format(exc))
 
     result = {
         'our_guild': our_guild['name'],
@@ -295,11 +298,13 @@ def update_all_sync():
         result['enemy_guild'] = enemy_guild['name']
         result['defenses'] = len(members)
     else:
-        pvp_data = query_pvp_rank(client)
+        sub_client = get_sub_game_client()
+        sub_client.login(attempts=3)
+        pvp_data = query_pvp_rank(sub_client)
         result['pvp_equips'] = save_pvp_equips(pvp_data)
-        ranked_guilds = query_top_guilds(client)
+        ranked_guilds = query_top_guilds(sub_client)
         result['ranked_guilds'] = len(ranked_guilds)
-        battle_result = update_gvg_battles(client, ranked_guilds)
+        battle_result = update_gvg_battles(sub_client, ranked_guilds)
         result['battles'] = battle_result['saved']
         if battle_result['member_failures']:
             warnings.append('前20团有 {} 名成员日志查询失败，已跳过'.format(

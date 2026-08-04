@@ -6,9 +6,8 @@ from collections import Counter
 import numpy as np
 
 from .api import (
-    GameClient,
     GameRequestError,
-    load_config,
+    get_sub_game_client,
     query_player_card,
     search_friend_players,
 )
@@ -278,8 +277,7 @@ def query_pvp_speeds_sync(query, db_path=DATA_DB_PATH):
     if not query:
         return '格式：查速 玩家名或UID'
 
-    config = load_config()
-    client = GameClient(config)
+    client = get_sub_game_client()
     client.login(attempts=3)
     if query.isdigit():
         targets = [{'CUID': int(query), 'Name': query}]

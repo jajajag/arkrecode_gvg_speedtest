@@ -1,6 +1,7 @@
 import base64
 import json
 import random
+import threading
 import time
 from pathlib import Path
 
@@ -10,6 +11,8 @@ import requests
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / 'data'
 ACCOUNT_PATH = DATA_DIR / 'account.json'
+MAIN_ACCOUNT = 'MainAccount'
+SUB_ACCOUNT = 'SubAccount'
 
 GAME_URL = 'https://game-arkre-labs.ecchi.xxx/Router/RouterHandler.ashx'
 TOKEN_URL = 'https://sadpki-portal-v2.ebuajk.com/api/v2/token/access'
@@ -38,7 +41,10 @@ def oid(value):
     return str(value or '')
 
 
-def load_config(path=ACCOUNT_PATH):
+_ACCOUNT_FILE_LOCK = threading.Lock()
+
+
+def _read_account_file(path):
     path = Path(path)
     if not path.is_file():
         raise ConfigError(
@@ -48,25 +54,43 @@ def load_config(path=ACCOUNT_PATH):
             config = json.load(file)
     except (OSError, json.JSONDecodeError) as exc:
         raise ConfigError('account.json 读取失败：{}'.format(exc)) from exc
-    required = ('Name', 'Token')
-    missing = [key for key in required if not str(config.get(key, '')).strip()]
-    if missing:
-        raise ConfigError('account.json 缺少：{}'.format('、'.join(missing)))
+    if not isinstance(config, dict):
+        raise ConfigError('account.json 顶层必须是 JSON 对象')
     return config
 
 
-def save_config(config, path=ACCOUNT_PATH):
+def load_config(account, path=ACCOUNT_PATH):
+    with _ACCOUNT_FILE_LOCK:
+        config = _read_account_file(path)
+    account_config = config.get(account)
+    if not isinstance(account_config, dict):
+        raise ConfigError('account.json 缺少账号节点：{}'.format(account))
+    required = ('Name', 'Token')
+    missing = [key for key in required
+               if not str(account_config.get(key, '')).strip()]
+    if missing:
+        raise ConfigError('account.json 的 {} 缺少：{}'.format(
+            account, '、'.join(missing)))
+    return dict(account_config)
+
+
+def save_config(account, account_config, path=ACCOUNT_PATH):
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + '.tmp')
-    with temp_path.open('w', encoding='utf-8') as file:
-        json.dump(config, file, ensure_ascii=False, indent=2)
-    temp_path.replace(path)
+    with _ACCOUNT_FILE_LOCK:
+        config = _read_account_file(path)
+        config[account] = dict(account_config)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(path.suffix + '.tmp')
+        with temp_path.open('w', encoding='utf-8') as file:
+            json.dump(config, file, ensure_ascii=False, indent=2)
+        temp_path.replace(path)
 
 
 class GameClient:
-    def __init__(self, config, account_path=ACCOUNT_PATH, session=None):
+    def __init__(self, config, account=SUB_ACCOUNT,
+                 account_path=ACCOUNT_PATH, session=None):
         self.config = config
+        self.account = account
         self.account_path = Path(account_path)
         self.http = session or requests.Session()
         self.aid = None
@@ -74,6 +98,7 @@ class GameClient:
         self.cuid = None
         self.bulletin = None
         self.rank_week = None
+        self._request_lock = threading.RLock()
 
     def _post(self, url, payload=None, headers=None, timeout=60):
         response = self.http.post(
@@ -108,8 +133,7 @@ class GameClient:
         return self._post(GAME_URL, {'route': route, 'data': data})
 
     def _login_once(self):
-        bulletin = self._send_route(
-            'GameServerDBSettingHandler.QueryBulletinInfoResult', {})
+        bulletin = query_bulletin(self.http)
         info = bulletin.get('Info') or {}
         versions = info.get('AvailableVersions') or []
         if not versions:
@@ -140,7 +164,7 @@ class GameClient:
             if not login_id or not login_token or not refresh_token:
                 raise GameRequestError('刷新 Token 的响应字段不完整')
             self.config['Token'] = refresh_token
-            save_config(self.config, self.account_path)
+            save_config(self.account, self.config, self.account_path)
 
         result = self._send_route('AccountHandler.Login', {
             'LoginID': login_id,
@@ -160,54 +184,113 @@ class GameClient:
             'PVPRankInfo') or {}).get('RankWeek'))
         return result
 
-    def login(self, attempts=3):
-        last_error = None
-        for attempt in range(1, attempts + 1):
-            try:
-                return self._login_once()
-            except Exception as exc:
-                last_error = exc
-                self.aid = self.session_id = self.cuid = None
-                self.rank_week = None
-                if attempt < attempts:
-                    time.sleep(attempt)
-        raise GameRequestError('连续登录 {} 次失败：{}'.format(
-            attempts, last_error)) from last_error
+    def login(self, attempts=3, force=False):
+        with self._request_lock:
+            if self.session_id and not force:
+                return None
+            last_error = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    return self._login_once()
+                except Exception as exc:
+                    last_error = exc
+                    self.aid = self.session_id = self.cuid = None
+                    self.rank_week = None
+                    if attempt < attempts:
+                        time.sleep(attempt)
+            raise GameRequestError('连续登录 {} 次失败：{}'.format(
+                attempts, last_error)) from last_error
 
     def call(self, route, data=None, attempts=3, delay=None,
              required_key=None):
-        last_error = None
-        for attempt in range(1, attempts + 1):
-            try:
-                if not self.session_id:
-                    self.login(attempts=3)
-                payload = dict(data or {})
-                payload.update({'AID': self.aid, 'SessionID': self.session_id})
-                result = self._send_route(route, payload, delay=delay)
-                if required_key and required_key not in result:
-                    raise GameRequestError(
-                        '{} 响应缺少 {}'.format(route, required_key))
-                return result
-            except Exception as exc:
-                last_error = exc
-                self.aid = self.session_id = self.cuid = None
-                if attempt < attempts:
-                    self.login(attempts=3)
-        raise GameRequestError(
-            '{} 连续请求 {} 次失败：{}'.format(route, attempts, last_error)
-        ) from last_error
+        with self._request_lock:
+            last_error = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    if not self.session_id:
+                        self.login(attempts=3)
+                    payload = dict(data or {})
+                    payload.update({
+                        'AID': self.aid,
+                        'SessionID': self.session_id,
+                    })
+                    result = self._send_route(route, payload, delay=delay)
+                    if required_key and required_key not in result:
+                        raise GameRequestError(
+                            '{} 响应缺少 {}'.format(route, required_key))
+                    return result
+                except Exception as exc:
+                    last_error = exc
+                    self.aid = self.session_id = self.cuid = None
+                    self.rank_week = None
+                    if attempt < attempts:
+                        self.login(attempts=3)
+            raise GameRequestError(
+                '{} 连续请求 {} 次失败：{}'.format(
+                    route, attempts, last_error)
+            ) from last_error
 
     def call_once(self, route, data=None, delay=None, required_key=None):
         """Send one request without clearing or refreshing the session."""
-        if not self.session_id:
-            raise GameRequestError('当前没有有效登录会话')
-        payload = dict(data or {})
-        payload.update({'AID': self.aid, 'SessionID': self.session_id})
-        result = self._send_route(route, payload, delay=delay)
-        if required_key and required_key not in result:
-            raise GameRequestError(
-                '{} 响应缺少 {}'.format(route, required_key))
-        return result
+        with self._request_lock:
+            if not self.session_id:
+                raise GameRequestError('当前没有有效登录会话')
+            payload = dict(data or {})
+            payload.update({'AID': self.aid, 'SessionID': self.session_id})
+            result = self._send_route(route, payload, delay=delay)
+            if required_key and required_key not in result:
+                raise GameRequestError(
+                    '{} 响应缺少 {}'.format(route, required_key))
+            return result
+
+
+def query_bulletin(session=None):
+    """Fetch public patch/version metadata without a game login."""
+    owns_session = session is None
+    http = session or requests.Session()
+    try:
+        response = http.post(
+            GAME_URL,
+            json={
+                'route': (
+                    'GameServerDBSettingHandler.QueryBulletinInfoResult'),
+                'data': {},
+            },
+            headers=GAME_HEADERS,
+            verify=False,
+            timeout=60,
+        )
+        response.raise_for_status()
+        response.encoding = 'utf-8'
+        data = response.json()
+        GameClient._check_response(data)
+        return data
+    finally:
+        if owns_session:
+            http.close()
+
+
+_SHARED_CLIENTS = {}
+_SHARED_CLIENT_LOCK = threading.Lock()
+
+
+def get_shared_game_client(account):
+    """Return the process-wide client for one configured game account."""
+    if account not in (MAIN_ACCOUNT, SUB_ACCOUNT):
+        raise ConfigError('未知账号节点：{}'.format(account))
+    with _SHARED_CLIENT_LOCK:
+        if account not in _SHARED_CLIENTS:
+            _SHARED_CLIENTS[account] = GameClient(
+                load_config(account), account=account)
+        return _SHARED_CLIENTS[account]
+
+
+def get_main_game_client():
+    return get_shared_game_client(MAIN_ACCOUNT)
+
+
+def get_sub_game_client():
+    return get_shared_game_client(SUB_ACCOUNT)
 
 
 def query_guild(client, guild_id):
