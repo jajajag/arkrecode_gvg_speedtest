@@ -314,6 +314,18 @@ class GameClient:
             '{} 连续请求 {} 次失败：{}'.format(route, attempts, last_error)
         ) from last_error
 
+    def call_once(self, route, data=None, delay=None, required_key=None):
+        """Send one request without clearing or refreshing the session."""
+        if not self.session_id:
+            raise GameRequestError('当前没有有效登录会话')
+        payload = dict(data or {})
+        payload.update({'AID': self.aid, 'SessionID': self.session_id})
+        result = self._send_route(route, payload, delay=delay)
+        if required_key and required_key not in result:
+            raise GameRequestError(
+                '{} 响应缺少 {}'.format(route, required_key))
+        return result
+
 
 def query_guild(client, guild_id):
     return client.call(
@@ -373,6 +385,7 @@ def parse_defense_members(guild_data):
 
 
 def replace_defenses(members, db_path=DATA_DB_PATH, snapshot_date=None):
+    init_database(db_path)
     snapshot_date = snapshot_date or _today()
     conn = connect_data(db_path)
     try:
@@ -415,6 +428,7 @@ def replace_defenses(members, db_path=DATA_DB_PATH, snapshot_date=None):
 
 
 def clear_member_info(db_path=DATA_DB_PATH):
+    init_database(db_path)
     conn = connect_data(db_path)
     try:
         conn.execute('UPDATE xiyan_members SET info=NULL, info_date=NULL')
@@ -433,7 +447,7 @@ def query_member_logs(client, cuid):
 
 
 def query_battle_detail(client, battle_id):
-    return client.call(
+    return client.call_once(
         'GuildWarHandler.QueryGuildWarBattleLogByID',
         {'TargetCUID': int(client.cuid), 'TargetID': battle_id},
         delay=(0.8, 1.2),
@@ -531,13 +545,19 @@ def parse_battle_detail(data):
 
 def save_battle_rows(rows, db_path=DATA_DB_PATH):
     if not rows:
-        return
+        return False
+    init_database(db_path)
     battle_id = rows[0]['battle_id']
     conn = connect_data(db_path)
     try:
         conn.execute('BEGIN IMMEDIATE')
-        conn.execute('DELETE FROM gvg_units WHERE battle_id = ?', (battle_id,))
-        conn.execute('DELETE FROM gvg_rounds WHERE battle_id = ?', (battle_id,))
+        exists = conn.execute(
+            'SELECT 1 FROM gvg_rounds WHERE battle_id = ? LIMIT 1',
+            (battle_id,),
+        ).fetchone()
+        if exists:
+            conn.rollback()
+            return False
         for row in rows:
             conn.execute(
                 '''
@@ -566,6 +586,7 @@ def save_battle_rows(rows, db_path=DATA_DB_PATH):
                       unit['imprint'], int(unit['dead'])) for unit in team],
                 )
         conn.commit()
+        return True
     except Exception:
         conn.rollback()
         raise
@@ -573,16 +594,49 @@ def save_battle_rows(rows, db_path=DATA_DB_PATH):
         conn.close()
 
 
-def update_mutual_battles(client, guild_data_list, config):
+def existing_battle_ids(battle_ids, db_path=DATA_DB_PATH):
+    init_database(db_path)
+    battle_ids = list(battle_ids)
+    if not battle_ids:
+        return set()
+    conn = connect_data(db_path)
+    try:
+        existing = set()
+        batch_size = 900
+        for start in range(0, len(battle_ids), batch_size):
+            batch = battle_ids[start:start + batch_size]
+            placeholders = ','.join('?' for _ in batch)
+            existing.update(row['battle_id'] for row in conn.execute(
+                'SELECT DISTINCT battle_id FROM gvg_rounds '
+                'WHERE battle_id IN ({})'.format(placeholders),
+                batch,
+            ))
+        return existing
+    finally:
+        conn.close()
+
+
+def update_mutual_battles(client, guild_data_list, config,
+                          db_path=DATA_DB_PATH):
     guild_names = (config['our_guild_name'], config['target_guild_name'])
     refs = collect_mutual_battle_refs(client, guild_data_list, guild_names)
+    known_ids = existing_battle_ids(refs, db_path)
     saved = 0
-    for battle_id in sorted(refs):
-        rows = parse_battle_detail(query_battle_detail(client, battle_id))
+    consecutive_failures = 0
+    for battle_id in sorted(set(refs) - known_ids):
+        try:
+            rows = parse_battle_detail(query_battle_detail(client, battle_id))
+        except Exception:
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                client.login(attempts=3)
+                consecutive_failures = 0
+            continue
+        consecutive_failures = 0
         if {rows[0]['atk_guild'], rows[0]['def_guild']} != set(guild_names):
             continue
-        save_battle_rows(rows)
-        saved += 1
+        if save_battle_rows(rows, db_path):
+            saved += 1
     return saved
 
 
@@ -873,6 +927,7 @@ def _rounds_since(conn, since_ts):
 
 
 def format_solutions(role_ids, db_path=DATA_DB_PATH):
+    init_database(db_path)
     config = load_config()
     conn = connect_data(db_path)
     try:
@@ -920,6 +975,7 @@ def _defense_units(conn):
 
 
 def format_defenses(db_path=DATA_DB_PATH):
+    init_database(db_path)
     config = load_config()
     conn = connect_data(db_path)
     try:
@@ -960,6 +1016,7 @@ def member_defense_rate(conn, cuid, our_guild_name):
 
 
 def format_win_rates(db_path=DATA_DB_PATH):
+    init_database(db_path)
     config = load_config()
     conn = connect_data(db_path)
     try:
@@ -993,6 +1050,7 @@ def _normalize_speed(value):
 
 
 def set_first_speed(player_query, speed, db_path=DATA_DB_PATH):
+    init_database(db_path)
     normalized = _normalize_speed(speed)
     if normalized is None:
         return '一速格式错误，请输入 227 或 265-270。'
@@ -1026,6 +1084,7 @@ def _resolve_player_prefix(text, conn):
 
 
 def set_member_info(text, db_path=DATA_DB_PATH, weekday=None):
+    init_database(db_path)
     weekday = datetime.now().isoweekday() if weekday is None else weekday
     if weekday not in (1, 3, 5):
         return '临时信息只在周一、周三、周五保存。'
@@ -1046,6 +1105,7 @@ def set_member_info(text, db_path=DATA_DB_PATH, weekday=None):
 
 
 def format_player(player_query, db_path=DATA_DB_PATH):
+    init_database(db_path)
     config = load_config()
     conn = connect_data(db_path)
     try:
@@ -1128,6 +1188,10 @@ XIYAN_HELP = (
 )
 
 
+def _format_query_reply(message):
+    return message if message.startswith('查询失败：') else '\n' + message
+
+
 _REGISTERED = False
 
 
@@ -1136,6 +1200,7 @@ def register_xiyan(service):
     if _REGISTERED:
         return
     _REGISTERED = True
+    init_database()
 
     @service.scheduled_job('cron', day_of_week='mon,wed,fri', hour=8,
                            minute=5)
@@ -1169,7 +1234,7 @@ def register_xiyan(service):
                 message = format_defenses()
             except Exception as exc:
                 message = '查询失败：{}'.format(exc)
-            await bot.send(ev, '\n' + message, at_sender=False)
+            await bot.send(ev, _format_query_reply(message), at_sender=False)
             return
 
         if raw == '胜率表':
@@ -1177,7 +1242,7 @@ def register_xiyan(service):
                 message = format_win_rates()
             except Exception as exc:
                 message = '查询失败：{}'.format(exc)
-            await bot.send(ev, '\n' + message, at_sender=False)
+            await bot.send(ev, _format_query_reply(message), at_sender=False)
             return
 
         if raw.startswith('团战作业'):
@@ -1190,7 +1255,7 @@ def register_xiyan(service):
                     message = error or format_solutions(role_ids)
                 except Exception as exc:
                     message = '查询失败：{}'.format(exc)
-            await bot.send(ev, '\n' + message, at_sender=True)
+            await bot.send(ev, _format_query_reply(message), at_sender=True)
             return
 
         if raw.startswith('一速'):
@@ -1218,4 +1283,4 @@ def register_xiyan(service):
             message = format_player(raw)
         except Exception as exc:
             message = '查询失败：{}'.format(exc)
-        await bot.send(ev, '\n' + message, at_sender=True)
+        await bot.send(ev, _format_query_reply(message), at_sender=True)
