@@ -65,13 +65,13 @@ async def speed_test(bot, ev: CQEvent):
     raw = ev.message.extract_plain_text()
     # Output instructions if no text is provided
     if not raw.strip():
-        await bot.finish(ev, sv_help, at_sender=True)
+        await bot.finish(ev, sv_help, at_sender=False)
     # Parse the input tokens
     try:
         allies, enemies = _parse_tokens_test(raw)
     except Exception as e:
         await bot.finish(ev, 
-            f'输入错误，请检查输入，或发团战测速查看详细用法', at_sender=True)
+            f'输入错误，请检查输入，或发团战测速查看详细用法', at_sender=False)
     # Compute the speeds of enemies
     ret = await compute_speed_async(allies=allies, enemies=enemies, 
                                     N_sample=int(1e6))
@@ -84,7 +84,7 @@ async def speed_test(bot, ev: CQEvent):
             f'稳定超车速度{ally_min:.1f}'
         )
     msg = '\n'.join(lines)
-    await bot.send(ev, msg, at_sender=True)
+    await bot.send(ev, msg, at_sender=False)
 
 def _parse_tokens_summary(text: str):
     tokens = text.strip().split()
@@ -129,12 +129,12 @@ def _parse_tokens_summary(text: str):
 async def speed_summary(bot, ev: CQEvent):
     raw = ev.message.extract_plain_text()
     if not raw.strip():
-        await bot.finish(ev, sv_help, at_sender=True)
+        await bot.finish(ev, sv_help, at_sender=False)
     try:
         title, allies, enemies = _parse_tokens_summary(raw)
     except Exception:
         await bot.finish(ev, 
-            f'输入错误，请检查输入，或发团战测速查看详细用法', at_sender=True)
+            f'输入错误，请检查输入，或发团战测速查看详细用法', at_sender=False)
     ret = await compute_speed_async(allies=allies, enemies=enemies,
                                     N_sample=int(1e6))
     # Sort by mode_int (most possible speed)
@@ -160,9 +160,9 @@ async def overtake(bot, ev: CQEvent):
         prob = overtake_prob(v1, v2)
         percent = round(prob * 100, 2)
         await bot.send(ev,
-            f'乱速的概率为：{percent}%', at_sender=True)
+            f'乱速的概率为：{percent}%', at_sender=False)
     except Exception as e:
-        await bot.send(ev, f'计算错误，请检查输入数值是否正确', at_sender=True)
+        await bot.send(ev, f'计算错误，请检查输入数值是否正确', at_sender=False)
 
 
 register_gvg(sv)

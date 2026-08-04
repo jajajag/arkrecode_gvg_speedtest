@@ -1039,6 +1039,8 @@ def format_solutions(role_ids, db_path=DATA_DB_PATH):
         conn.close()
     target = tuple(sorted(role_ids))
     roles = _role_name_map()
+    defense = '防守：{}'.format(
+        '+'.join(roles.get(role, role) for role in role_ids))
     sections = []
     for guild in (config['our_guild_name'], config['target_guild_name']):
         grouped = defaultdict(list)
@@ -1065,7 +1067,7 @@ def format_solutions(role_ids, db_path=DATA_DB_PATH):
             lines.append('- {}，胜率{}%，掉人率{}%'.format(
                 names, win_pct, drop_pct))
         sections.append('\n'.join(lines))
-    return '\n\n'.join(sections)
+    return defense + '\n' + '\n'.join(sections)
 
 
 def _defense_units(conn):
@@ -1097,7 +1099,7 @@ def format_defenses(db_path=DATA_DB_PATH):
                          for role in units[int(member['cuid'])][1]) or '-'
         second = '+'.join(roles.get(role, role)
                           for role in units[int(member['cuid'])][2]) or '-'
-        blocks.append('\n\n'.join((
+        blocks.append('\n'.join((
             '{:02d}. {}（{}）'.format(index, member['name'], avatar),
             '上半：{}'.format(first),
             '下半：{}'.format(second),
@@ -1291,14 +1293,14 @@ async def run_update_job(service, mode, bot=None, ev=None,
             for warning in result['warnings']:
                 await report_to_superuser('团战更新警告：\n' + warning)
         if bot is not None and ev is not None:
-            await bot.send(ev, message, at_sender=True)
+            await bot.send(ev, message, at_sender=False)
         else:
             service.logger.info(message)
     except Exception as exc:
         service.logger.exception(exc)
         message = '团战数据更新失败：\n{}'.format(exc)
         if bot is not None and ev is not None:
-            await bot.send(ev, message, at_sender=True)
+            await bot.send(ev, message, at_sender=False)
         if notify_superuser:
             await report_to_superuser(message)
 
@@ -1345,16 +1347,16 @@ def register_gvg(service):
         if raw.startswith(('测速', '总结')):
             return
         if not raw:
-            await bot.send(ev, GVG_HELP, at_sender=True)
+            await bot.send(ev, GVG_HELP, at_sender=False)
             return
 
         if raw == '更新数据':
             from hoshino.config import SUPERUSERS
             if str(ev.user_id) not in {str(user) for user in SUPERUSERS}:
                 await bot.send(ev, '只有机器人主人可以强制更新数据。',
-                               at_sender=True)
+                               at_sender=False)
                 return
-            await bot.send(ev, '开始更新团战数据，请稍候。', at_sender=True)
+            await bot.send(ev, '开始更新团战数据，请稍候。', at_sender=False)
             await run_update_job(
                 service, 'both', bot, ev, notify_superuser=False)
             return
@@ -1385,7 +1387,7 @@ def register_gvg(service):
                     message = error or format_solutions(role_ids)
                 except Exception as exc:
                     message = '查询失败：{}'.format(exc)
-            await bot.send(ev, _format_query_reply(message), at_sender=True)
+            await bot.send(ev, _format_query_reply(message), at_sender=False)
             return
 
         if raw.startswith('一速'):
@@ -1398,7 +1400,7 @@ def register_gvg(service):
                     message = set_first_speed(match.group(1), match.group(2))
                 except Exception as exc:
                     message = '更新失败：{}'.format(exc)
-            await bot.send(ev, message, at_sender=True)
+            await bot.send(ev, message, at_sender=False)
             return
 
         if raw.startswith('信息'):
@@ -1406,11 +1408,11 @@ def register_gvg(service):
                 message = set_member_info(raw[len('信息'):].strip())
             except Exception as exc:
                 message = '更新失败：{}'.format(exc)
-            await bot.send(ev, message, at_sender=True)
+            await bot.send(ev, message, at_sender=False)
             return
 
         try:
             message = format_player(raw)
         except Exception as exc:
             message = '查询失败：{}'.format(exc)
-        await bot.send(ev, _format_query_reply(message), at_sender=True)
+        await bot.send(ev, _format_query_reply(message), at_sender=False)
