@@ -38,8 +38,7 @@ async def run_update_job(service, bot=None, ev=None, notify_superuser=True):
         result = await asyncio.to_thread(update_all_sync)
         message = update_result_text(result)
         if notify_superuser:
-            for warning in result['warnings']:
-                await report_to_superuser('团战更新警告：\n' + warning)
+            await report_to_superuser(message)
         if bot is not None and ev is not None:
             await bot.send(ev, message, at_sender=False)
         else:

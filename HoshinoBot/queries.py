@@ -197,13 +197,16 @@ def _rounds_since(conn, since_ts):
     return rounds
 
 
-def _rank_solutions(rounds, target, atk_guild=None, limit=None):
+def _rank_solutions(rounds, target, atk_guild=None, def_guild=None,
+                    limit=None):
     grouped = defaultdict(list)
     for item in rounds:
         row = item['row']
         if tuple(sorted(item['def'])) != target:
             continue
         if atk_guild is not None and row['atk_guild'] != atk_guild:
+            continue
+        if def_guild is not None and row['def_guild'] != def_guild:
             continue
         grouped[tuple(sorted(item['atk']))].append(item)
 
@@ -212,8 +215,8 @@ def _rank_solutions(rounds, target, atk_guild=None, limit=None):
         total = len(items)
         wins = sum(int(item['row']['win']) for item in items)
         drops = sum(int(item['atk_dead']) for item in items)
-        ranked.append((wins / total, total, team, drops))
-    ranked.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        ranked.append((wins / total, total, drops / total, team))
+    ranked.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
     return ranked[:limit] if limit is not None else ranked
 
 
@@ -221,10 +224,10 @@ def _solution_lines(title, ranked, roles):
     lines = [title]
     if not ranked:
         lines.append('- 暂无记录')
-    for rate, total, team, drops in ranked:
+    for rate, total, drop_rate, team in ranked:
         names = '+'.join(roles.get(role, role) for role in team)
         win_pct = int(rate * 100 + 0.5)
-        drop_pct = int(drops / total * 100 + 0.5)
+        drop_pct = int(drop_rate * 100 + 0.5)
         lines.append('- {}，胜率{}%，掉人率{}%'.format(
             names, win_pct, drop_pct))
     return lines
@@ -251,16 +254,27 @@ def format_solutions(role_ids, db_path=DATA_DB_PATH):
         role_ids, db_path)
     sections = []
     has_matchup_solutions = False
-    for guild in (context['our']['name'], context['enemy']['name']):
-        ranked = _rank_solutions(rounds, target, atk_guild=guild)
+    matchups = (
+        (context['our']['name'], context['enemy']['name']),
+        (context['enemy']['name'], context['our']['name']),
+    )
+    for atk_guild, def_guild in matchups:
+        ranked = _rank_solutions(
+            rounds, target,
+            atk_guild=atk_guild,
+            def_guild=def_guild,
+            limit=5,
+        )
         has_matchup_solutions = has_matchup_solutions or bool(ranked)
         if ranked:
             sections.append('\n'.join(_solution_lines(
-                '{}解法：'.format(guild), ranked, roles)))
+                '{}解法：'.format(atk_guild), ranked, roles)))
     if not has_matchup_solutions:
-        ranked = _rank_solutions(rounds, target, limit=10)
+        ranked = _rank_solutions(rounds, target, limit=5)
+        sections.append(
+            '近30天内无针对该防守的交手记录，以下为整体解法。')
         sections.append('\n'.join(_solution_lines(
-            '暂无本团解法，全团解法：', ranked, roles)))
+            '整体解法：', ranked, roles)))
     return defense + '\n' + '\n'.join(sections)
 
 
@@ -315,12 +329,19 @@ def member_defense_stats(conn, cuid, def_guild_name, atk_guild_name=None):
     return int(row['successes'] or 0), int(row['total'])
 
 
-def member_defense_rate(conn, cuid, def_guild_name, atk_guild_name=None):
+def member_defense_rate(conn, cuid, def_guild_name, atk_guild_name=None,
+                        fallback_overall=False):
     successes, total = member_defense_stats(
         conn, cuid, def_guild_name, atk_guild_name)
+    overall = False
+    if not total and fallback_overall and atk_guild_name is not None:
+        successes, total = member_defense_stats(
+            conn, cuid, def_guild_name)
+        overall = bool(total)
     if not total:
         return '-'
-    return '{:.1f}%'.format(successes / total * 100)
+    text = '{:.1f}%'.format(successes / total * 100)
+    return text + '（整体）' if overall else text
 
 
 def format_win_rates(db_path=DATA_DB_PATH):
@@ -451,7 +472,7 @@ def format_player(player_query, db_path=DATA_DB_PATH):
             lines.append('一速：{}'.format(player['max_speed']))
         lines.append('防守胜率：{}'.format(member_defense_rate(
             conn, player['cuid'], context['enemy']['name'],
-            context['our']['name'])))
+            context['our']['name'], fallback_overall=True)))
         if player['info']:
             lines.append(str(player['info']))
         return '\n'.join(lines)
