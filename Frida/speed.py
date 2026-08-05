@@ -556,6 +556,8 @@ class SpeedAnalyzer:
         self.role_info = {}
         self.wave_phase = 0
         self.wave_phase_count = 1
+        self.gvg_battle_active = False
+        self.awaiting_gvg_start = False
         self.exact_mode = exact_mode
         self.last_end_times = None
         self.reset_phase_state()
@@ -570,12 +572,20 @@ class SpeedAnalyzer:
         prepared = prepare_battles_from_packet(data)
         if prepared is not None:
             self.pending_battles = deque(prepared)
+            self.awaiting_gvg_start = self.has_pending_gvg_battle()
+        if (
+            "NetBattleGameOverCmd" in data
+            and self.has_pending_gvg_battle()
+        ):
+            self.awaiting_gvg_start = True
         if data.get("StartBattle") is True:
             self.start_pending_battle()
 
         step = data.get("Step")
         round_result = data.get("RoundResult")
         if isinstance(round_result, dict):
+            if self.should_recover_gvg_start(step, round_result):
+                self.start_pending_battle()
             self.handle_round_result(step, round_result)
         action_result = data.get("ActionResult")
         if isinstance(action_result, dict):
@@ -588,10 +598,33 @@ class SpeedAnalyzer:
         if not prepared.role_info:
             return False
         self.start_battle(prepared.role_info, prepared.label)
+        self.awaiting_gvg_start = False
         return True
+
+    def has_pending_gvg_battle(self):
+        return bool(
+            self.pending_battles
+            and self.pending_battles[0].label in ("上半场", "下半场")
+        )
+
+    @staticmethod
+    def is_gvg_opening_result(step, round_result):
+        return (
+            step in ("FirstStartBattle", "StartWave")
+            and round_result.get("NowTurn") == 0
+            and round_result.get("LastStep") == step
+        )
+
+    def should_recover_gvg_start(self, step, round_result):
+        return (
+            self.has_pending_gvg_battle()
+            and (self.awaiting_gvg_start or self.printed)
+            and self.is_gvg_opening_result(step, round_result)
+        )
 
     def start_battle(self, role_info, label=""):
         self.role_info = role_info
+        self.gvg_battle_active = label in ("上半场", "下半场")
         ally_waves = {
             role_id.split("-")[1]
             for role_id in role_info
@@ -646,11 +679,35 @@ class SpeedAnalyzer:
             self.start_times = times
             return
         if self.start_times is None:
+            if (
+                self.gvg_battle_active
+                and not self.is_gvg_opening_result(step, round_result)
+            ):
+                return
             self.start_times = times
             return
         if self.printed:
             return
         if step == "StartRound":
+            if (
+                self.gvg_battle_active
+                and round_result.get("NowTurn") != 1
+            ):
+                return
+            role_ids = set(self.start_times) | set(times)
+            has_ally_reference = any(
+                role_id.startswith("1-")
+                and self.role_info.get(role_id, {}).get("speed")
+                for role_id in role_ids
+            )
+            has_time_change = any(
+                action_delta(
+                    self.start_times.get(role_id), times.get(role_id)
+                ) not in (None, 0)
+                for role_id in role_ids
+            )
+            if not has_ally_reference or not has_time_change:
+                return
             self.print_speed_report(times)
             self.printed = True
             self.announce_pending_enemy_roles()
