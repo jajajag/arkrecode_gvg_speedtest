@@ -228,8 +228,8 @@ def _solution_lines(title, ranked, roles):
         names = '+'.join(roles.get(role, role) for role in team)
         win_pct = int(rate * 100 + 0.5)
         drop_pct = int(drop_rate * 100 + 0.5)
-        lines.append('- {}，胜率{}%，掉人率{}%'.format(
-            names, win_pct, drop_pct))
+        lines.append('- {}，胜率{}%，场次{}，掉人率{}%'.format(
+            names, win_pct, total, drop_pct))
     return lines
 
 
