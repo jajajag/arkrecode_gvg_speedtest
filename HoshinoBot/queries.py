@@ -2,7 +2,7 @@ import json
 import re
 import sqlite3
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .api import GameRequestError
 from .database import (
@@ -13,11 +13,51 @@ from .database import (
     init_database,
     meta_get,
     now_ms,
+    today,
 )
 
 
 RECENT_DAYS = 30
 MILLIS_PER_DAY = 24 * 60 * 60 * 1000
+INFO_FORMAT = 'gvg_info_v1'
+
+
+def encode_info_segments(segments):
+    normalized = []
+    for segment in segments:
+        kind = str(segment.get('type') or '')
+        if kind == 'text':
+            content = str(segment.get('content') or '')
+            if content:
+                normalized.append({'type': 'text', 'content': content})
+        elif kind == 'image':
+            image_path = str(segment.get('path') or '').replace('\\', '/')
+            parts = PurePosixPath(image_path).parts
+            if not image_path or not parts or parts[0] != 'images' \
+                    or '..' in parts or PurePosixPath(image_path).is_absolute():
+                raise ValueError('图片路径必须位于 images 目录内')
+            normalized.append({'type': 'image', 'path': image_path})
+        else:
+            raise ValueError('不支持的信息段类型：{}'.format(kind))
+    if not normalized:
+        raise ValueError('信息内容不能为空')
+    return json.dumps(
+        {'format': INFO_FORMAT, 'segments': normalized},
+        ensure_ascii=False,
+        separators=(',', ':'),
+    )
+
+
+def decode_info_segments(raw):
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise GameRequestError('玩家信息格式无效') from exc
+    if not isinstance(data, dict) or data.get('format') != INFO_FORMAT \
+            or not isinstance(data.get('segments'), list):
+        raise GameRequestError('玩家信息格式无效')
+    encoded = encode_info_segments(data['segments'])
+    return json.loads(encoded)['segments']
 
 
 def load_aliases(path=ALIAS_PATH):
@@ -425,31 +465,40 @@ def set_max_speed(player_query, speed, db_path=DATA_DB_PATH):
         conn.close()
 
 
-def _resolve_player_prefix(text, conn):
-    tokens = text.strip().split()
-    if len(tokens) < 2:
-        return None, None, '格式：团战 信息 玩家名或UID 信息内容'
-    errors = []
-    for split_at in range(len(tokens) - 1, 0, -1):
-        query = ' '.join(tokens[:split_at])
-        player, error = resolve_player(query, conn)
-        if player is not None:
-            return player, ' '.join(tokens[split_at:]), None
-        errors.append(error)
-    return None, None, errors[-1] if errors else '没有找到玩家。'
-
-
-def set_member_info(text, db_path=DATA_DB_PATH):
+def resolve_member_info_target(text, has_images=False,
+                               db_path=DATA_DB_PATH):
     init_database(db_path)
     conn = connect_data(db_path)
     try:
-        player, info, error = _resolve_player_prefix(text, conn)
-        if error:
-            return error
+        matches = list(re.finditer(r'\S+', text))
+        max_split = len(matches) if has_images else len(matches) - 1
+        if max_split < 1:
+            return None, None, '格式：团战 信息 玩家名或UID 信息内容或图片'
+        errors = []
+        for split_at in range(max_split, 0, -1):
+            query_end = matches[split_at - 1].end()
+            query = text[:query_end].strip()
+            player, error = resolve_player(query, conn)
+            if player is not None:
+                payload_start = (matches[split_at].start()
+                                 if split_at < len(matches) else len(text))
+                return dict(player), payload_start, None
+            errors.append(error)
+        return None, None, errors[-1] if errors else '没有找到玩家。'
+    finally:
+        conn.close()
+
+
+def set_member_info(player, segments, db_path=DATA_DB_PATH):
+    init_database(db_path)
+    encoded = encode_info_segments(segments)
+    conn = connect_data(db_path)
+    try:
         conn.execute(
-            'UPDATE gvg_members SET info=?, updated_at=? '
+            'UPDATE gvg_members '
+            'SET info=?, info_date=?, updated_at=? '
             'WHERE cuid=?',
-            (info, now_ms(), int(player['cuid'])),
+            (encoded, today(), now_ms(), int(player['cuid'])),
         )
         conn.commit()
         return '已保存 {} 的信息。'.format(player['name'])
@@ -474,7 +523,11 @@ def format_player(player_query, db_path=DATA_DB_PATH):
             conn, player['cuid'], context['enemy']['name'],
             context['our']['name'], fallback_overall=True)))
         if player['info']:
-            lines.append(str(player['info']))
+            segments = decode_info_segments(player['info'])
+            return [
+                {'type': 'text', 'content': '\n'.join(lines) + '\n'},
+                *segments,
+            ]
         return '\n'.join(lines)
     finally:
         conn.close()

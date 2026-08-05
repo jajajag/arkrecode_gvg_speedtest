@@ -1,15 +1,17 @@
 import sqlite3
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
 
-from .api import BASE_DIR, GameRequestError, oid
+from .api import BASE_DIR, GameRequestError, INFO_IMAGE_LOCK, oid
 
 
 DATA_DIR = BASE_DIR / 'data'
 DATA_DB_PATH = DATA_DIR / 'data.db'
 MASTER_DB_PATH = DATA_DIR / 'master.db'
 ALIAS_PATH = DATA_DIR / 'character_dic.json'
+IMAGES_DIR = BASE_DIR / 'images'
 
 
 def today():
@@ -26,6 +28,15 @@ def connect_data(path=DATA_DB_PATH):
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA busy_timeout = 30000')
     return conn
+
+
+def clear_info_images(path=IMAGES_DIR):
+    path = Path(path)
+    if path.is_symlink():
+        raise RuntimeError('拒绝清理符号链接图片目录：{}'.format(path))
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
 
 
 def init_database(path=DATA_DB_PATH):
@@ -204,7 +215,19 @@ def save_pvp_equips(data, db_path=DATA_DB_PATH):
 
 
 def replace_defenses(members, enemy_guild, db_path=DATA_DB_PATH,
-                     snapshot_date=None):
+                     snapshot_date=None, images_dir=IMAGES_DIR):
+    with INFO_IMAGE_LOCK:
+        return _replace_defenses_locked(
+            members,
+            enemy_guild,
+            db_path=db_path,
+            snapshot_date=snapshot_date,
+            images_dir=images_dir,
+        )
+
+
+def _replace_defenses_locked(members, enemy_guild, db_path=DATA_DB_PATH,
+                             snapshot_date=None, images_dir=IMAGES_DIR):
     init_database(db_path)
     snapshot_date = snapshot_date or today()
     conn = connect_data(db_path)
@@ -222,14 +245,10 @@ def replace_defenses(members, enemy_guild, db_path=DATA_DB_PATH,
         )
         is_new_match = previous_date != snapshot_date or not same_enemy
         conn.execute('DELETE FROM gvg_defences')
-        cuids = [int(member['cuid']) for member in members]
-        if is_new_match and cuids:
-            placeholders = ','.join('?' for _ in cuids)
+        if is_new_match:
             conn.execute(
-                'UPDATE gvg_members SET info=NULL '
-                'WHERE cuid IN ({})'.format(placeholders),
-                cuids,
-            )
+                'UPDATE gvg_members SET info=NULL, info_date=NULL '
+                'WHERE info IS NOT NULL OR info_date IS NOT NULL')
         for member in members:
             upper = [role_id for _, role_id in sorted(member['first'])]
             lower = [role_id for _, role_id in sorted(member['second'])]
@@ -265,6 +284,8 @@ def replace_defenses(members, enemy_guild, db_path=DATA_DB_PATH,
         meta_set(conn, 'current_enemy_guild_name', guild_name)
         meta_set(conn, 'current_match_date', snapshot_date)
         conn.commit()
+        if is_new_match:
+            clear_info_images(images_dir)
     except Exception:
         conn.rollback()
         raise

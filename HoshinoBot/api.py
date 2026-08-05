@@ -1,9 +1,11 @@
 import base64
+import hashlib
 import json
 import random
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
@@ -26,6 +28,10 @@ GAME_HEADERS = {
 
 requests.packages.urllib3.disable_warnings()
 
+MAX_INFO_IMAGES = 3
+MAX_INFO_IMAGE_BYTES = 8 * 1024 * 1024
+INFO_IMAGE_LOCK = threading.RLock()
+
 
 class ConfigError(RuntimeError):
     pass
@@ -39,6 +45,67 @@ def oid(value):
     if isinstance(value, dict):
         return str(value.get('$oid') or value.get('$id') or '')
     return str(value or '')
+
+
+def _image_extension(data):
+    if data.startswith(b'\xff\xd8\xff'):
+        return '.jpg'
+    if data.startswith(b'\x89PNG\r\n\x1a\n'):
+        return '.png'
+    if data.startswith((b'GIF87a', b'GIF89a')):
+        return '.gif'
+    if len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return '.webp'
+    if data.startswith(b'BM'):
+        return '.bmp'
+    return None
+
+
+def cache_info_images(image_data, images_dir):
+    image_data = list(image_data)
+    if len(image_data) > MAX_INFO_IMAGES:
+        raise GameRequestError(
+            '每次最多上传 {} 张图片'.format(MAX_INFO_IMAGES))
+    prepared = []
+    with requests.Session() as http:
+        for item in image_data:
+            url = str(item.get('url') or item.get('file') or '').strip()
+            parsed = urlparse(url)
+            if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+                raise GameRequestError('图片消息缺少可下载的 HTTP 地址')
+            with http.get(url, stream=True, timeout=60) as response:
+                response.raise_for_status()
+                content_length = response.headers.get('Content-Length')
+                if content_length and int(content_length) > MAX_INFO_IMAGE_BYTES:
+                    raise GameRequestError('单张图片不能超过 8MB')
+                chunks = []
+                size = 0
+                for chunk in response.iter_content(chunk_size=256 * 1024):
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > MAX_INFO_IMAGE_BYTES:
+                        raise GameRequestError('单张图片不能超过 8MB')
+                    chunks.append(chunk)
+            data = b''.join(chunks)
+            extension = _image_extension(data)
+            if not extension:
+                raise GameRequestError('只支持 JPG、PNG、GIF、WEBP 或 BMP 图片')
+            digest = hashlib.sha256(data).hexdigest()
+            prepared.append((digest + extension, data))
+
+    images_dir = Path(images_dir)
+    relative_paths = []
+    with INFO_IMAGE_LOCK:
+        images_dir.mkdir(parents=True, exist_ok=True)
+        for filename, data in prepared:
+            destination = images_dir / filename
+            if not destination.exists():
+                temp_path = images_dir / (filename + '.tmp')
+                temp_path.write_bytes(data)
+                temp_path.replace(destination)
+            relative_paths.append('images/{}'.format(filename))
+    return relative_paths
 
 
 _ACCOUNT_FILE_LOCK = threading.Lock()

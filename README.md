@@ -78,7 +78,7 @@ pip install requests UnityPy
 团战 防守
 团战 胜率表
 团战 一速 玩家名或UID 速度
-团战 信息 玩家名或UID 内容
+团战 信息 玩家名或UID 内容或图片
 团战 玩家名或UID
 团战 更新数据（仅限Bot主））
 ```

@@ -6,3 +6,5 @@ HoshinoBot/data/data.db
 HoshinoBot/data/master.db
 HoshinoBot/data/character_dic.json
 HoshinoBot/data/gvg-master-*/
+HoshinoBot/data/*.bak
+HoshinoBot/images/
