@@ -7,6 +7,7 @@ from .api import BASE_DIR, INFO_IMAGE_LOCK, cache_info_images
 from .database import IMAGES_DIR, init_database
 from .queries import (
     format_defenses,
+    format_member_history,
     format_player,
     format_solutions,
     format_win_rates,
@@ -62,6 +63,7 @@ GVG_HELP = (
     '团战 胜率表\n'
     '团战 一速 玩家名或UID 速度\n'
     '团战 信息 玩家名或UID 内容或图片\n'
+    '团战 历史 玩家名或UID\n'
     '团战 玩家名或UID\n'
     '团战 更新数据（仅限Bot主）'
 )
@@ -232,15 +234,28 @@ def register_gvg(service):
 
         if raw.startswith('一速'):
             content = raw[len('一速'):].strip()
-            match = re.fullmatch(r'(.+?)\s+(\d{1,4}(?:-\d{1,4})?)', content)
+            match = re.fullmatch(
+                r'(.+?)\s+(\d{1,4}(?:-\d{1,4}|\+)?)', content)
             if not match:
-                message = '格式：团战 一速 玩家名或UID 227（或265-270）'
+                message = '格式：团战 一速 玩家名或UID 227（或265-270、122+）'
             else:
                 try:
                     message = set_max_speed(match.group(1), match.group(2))
                 except Exception as exc:
                     message = '更新失败：{}'.format(exc)
             await bot.send(ev, message, at_sender=False)
+            return
+
+        if raw == '历史' or re.match(r'历史\s', raw):
+            player_query = raw[len('历史'):].strip()
+            if not player_query:
+                message = '格式：团战 历史 玩家名或UID'
+            else:
+                try:
+                    message = format_member_history(player_query)
+                except Exception as exc:
+                    message = '查询失败：{}'.format(exc)
+            await bot.send(ev, _format_query_reply(message), at_sender=False)
             return
 
         if raw == '信息' or re.match(r'信息\s', raw):

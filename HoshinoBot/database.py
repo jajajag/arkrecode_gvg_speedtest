@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import shutil
 import time
@@ -65,6 +66,17 @@ def init_database(path=DATA_DB_PATH):
                 lower_3_role_id TEXT,
                 FOREIGN KEY (cuid) REFERENCES gvg_members(cuid)
             );
+            CREATE TABLE IF NOT EXISTS gvg_member_info_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cuid INTEGER NOT NULL,
+                player_name TEXT NOT NULL,
+                match_date TEXT,
+                enemy_guild_id TEXT,
+                enemy_guild_name TEXT,
+                info TEXT NOT NULL,
+                info_date TEXT,
+                archived_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS gvg_rounds (
                 battle_id TEXT NOT NULL,
                 round_idx INTEGER NOT NULL,
@@ -120,6 +132,8 @@ def init_database(path=DATA_DB_PATH):
                 ON gvg_rounds(def_cuid, atk_guild, start_ts);
             CREATE INDEX IF NOT EXISTS idx_gvg_units_role
                 ON gvg_units(side, role_id);
+            CREATE INDEX IF NOT EXISTS idx_gvg_info_history_player
+                ON gvg_member_info_history(cuid, archived_at DESC, id DESC);
             ''')
         conn.commit()
     finally:
@@ -226,6 +240,56 @@ def replace_defenses(members, enemy_guild, db_path=DATA_DB_PATH,
         )
 
 
+def _text_only_info(raw):
+    """Return encoded text segments, dropping images and invalid old data."""
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get('format') != 'gvg_info_v1':
+        return None
+    source_segments = data.get('segments')
+    if not isinstance(source_segments, list):
+        return None
+    segments = []
+    for segment in source_segments:
+        if not isinstance(segment, dict) or segment.get('type') != 'text':
+            continue
+        content = str(segment.get('content') or '')
+        if content:
+            segments.append({'type': 'text', 'content': content})
+    if not segments:
+        return None
+    return json.dumps(
+        {'format': 'gvg_info_v1', 'segments': segments},
+        ensure_ascii=False,
+        separators=(',', ':'),
+    )
+
+
+def _archive_member_info(conn, match_date, enemy_guild_id,
+                         enemy_guild_name):
+    archived_at = now_ms()
+    for member in conn.execute(
+            'SELECT cuid, name, info, info_date FROM gvg_members '
+            'WHERE info IS NOT NULL'):
+        text_info = _text_only_info(member['info'])
+        if text_info is None:
+            continue
+        conn.execute(
+            '''
+            INSERT INTO gvg_member_info_history(
+                cuid, player_name, match_date,
+                enemy_guild_id, enemy_guild_name,
+                info, info_date, archived_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (int(member['cuid']), str(member['name']), match_date,
+             enemy_guild_id, enemy_guild_name,
+             text_info, member['info_date'], archived_at),
+        )
+
+
 def _replace_defenses_locked(members, enemy_guild, db_path=DATA_DB_PATH,
                              snapshot_date=None, images_dir=IMAGES_DIR):
     init_database(db_path)
@@ -246,6 +310,12 @@ def _replace_defenses_locked(members, enemy_guild, db_path=DATA_DB_PATH,
         is_new_match = previous_date != snapshot_date or not same_enemy
         conn.execute('DELETE FROM gvg_defences')
         if is_new_match:
+            _archive_member_info(
+                conn,
+                previous_date,
+                previous_guild_id,
+                previous_guild_name,
+            )
             conn.execute(
                 'UPDATE gvg_members SET info=NULL, info_date=NULL '
                 'WHERE info IS NOT NULL OR info_date IS NOT NULL')

@@ -161,9 +161,13 @@ def _current_members(conn):
 
 
 def _ambiguous_players(rows):
-    lines = ['发现同名玩家：']
-    lines.extend('{}. {} {}'.format(index, row['name'], row['cuid'])
-                 for index, row in enumerate(rows, 1))
+    roles = _role_name_map()
+    lines = ['发现同名玩家，请使用UID代替玩家名：']
+    for index, row in enumerate(rows, 1):
+        avatar_role_id = row['avatar_role_id']
+        avatar = roles.get(avatar_role_id, avatar_role_id) or '未知'
+        lines.append('{}. {} {} {}头像'.format(
+            index, row['name'], row['cuid'], avatar))
     return '\n'.join(lines)
 
 
@@ -254,6 +258,8 @@ def _rank_solutions(rounds, target, atk_guild=None, def_guild=None,
     for team, items in grouped.items():
         total = len(items)
         wins = sum(int(item['row']['win']) for item in items)
+        if wins == 0:
+            continue
         drops = sum(int(item['atk_dead']) for item in items)
         ranked.append((wins / total, total, drops / total, team))
     ranked.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
@@ -303,14 +309,13 @@ def format_solutions(role_ids, db_path=DATA_DB_PATH):
             rounds, target,
             atk_guild=atk_guild,
             def_guild=def_guild,
-            limit=5,
         )
         has_matchup_solutions = has_matchup_solutions or bool(ranked)
         if ranked:
             sections.append('\n'.join(_solution_lines(
                 '{}解法：'.format(atk_guild), ranked, roles)))
     if not has_matchup_solutions:
-        ranked = _rank_solutions(rounds, target, limit=5)
+        ranked = _rank_solutions(rounds, target, limit=10)
         sections.append(
             '近30天内无针对该防守的交手记录，以下为整体解法。')
         sections.append('\n'.join(_solution_lines(
@@ -434,21 +439,23 @@ def format_win_rates(db_path=DATA_DB_PATH):
 
 
 def _normalize_speed(value):
-    match = re.fullmatch(r'(\d{1,4})(?:-(\d{1,4}))?', value.strip())
+    match = re.fullmatch(r'(\d{1,4})(?:(-)(\d{1,4})|(\+))?', value.strip())
     if not match:
         return None
     lower = int(match.group(1))
-    upper = int(match.group(2)) if match.group(2) else None
+    upper = int(match.group(3)) if match.group(3) else None
     if lower <= 0 or (upper is not None and upper < lower):
         return None
-    return str(lower) if upper is None else '{}-{}'.format(lower, upper)
+    if upper is not None:
+        return '{}-{}'.format(lower, upper)
+    return '{}+'.format(lower) if match.group(4) else str(lower)
 
 
 def set_max_speed(player_query, speed, db_path=DATA_DB_PATH):
     init_database(db_path)
     normalized = _normalize_speed(speed)
     if normalized is None:
-        return '一速格式错误，请输入 227 或 265-270。'
+        return '一速格式错误，请输入 227、265-270 或 122+。'
     conn = connect_data(db_path)
     try:
         player, error = resolve_player(
@@ -502,6 +509,44 @@ def set_member_info(player, segments, db_path=DATA_DB_PATH):
         )
         conn.commit()
         return '已保存 {} 的信息。'.format(player['name'])
+    finally:
+        conn.close()
+
+
+def format_member_history(player_query, db_path=DATA_DB_PATH, limit=5):
+    init_database(db_path)
+    conn = connect_data(db_path)
+    try:
+        player, error = resolve_player(
+            player_query, conn, current_only=False)
+        if error:
+            return error
+        rows = conn.execute(
+            '''
+            SELECT player_name, match_date, enemy_guild_name,
+                   info, info_date
+            FROM gvg_member_info_history
+            WHERE cuid = ?
+            ORDER BY archived_at DESC, id DESC
+            LIMIT ?
+            ''',
+            (int(player['cuid']), int(limit)),
+        ).fetchall()
+        if not rows:
+            return '{} 暂无历史信息。'.format(player['name'])
+        lines = ['{} 的最近{}次历史信息：'.format(
+            player['name'], len(rows))]
+        for index, row in enumerate(rows, 1):
+            date = row['match_date'] or row['info_date'] or '日期未知'
+            enemy = row['enemy_guild_name'] or '对手未知'
+            segments = decode_info_segments(row['info'])
+            content = ''.join(
+                segment['content'] for segment in segments
+                if segment['type'] == 'text'
+            ).strip()
+            lines.append('{}. {} 对阵{}\n{}'.format(
+                index, date, enemy, content))
+        return '\n'.join(lines)
     finally:
         conn.close()
 
