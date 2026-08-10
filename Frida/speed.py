@@ -67,6 +67,7 @@ class HookLayout:
 class PreparedBattle:
     role_info: dict
     label: str = ""
+    ally_side: str = "1"
 
 
 @dataclass(frozen=True)
@@ -474,6 +475,59 @@ def role_static_id_from_skill(skill_id):
     return match.group(1) if match else None
 
 
+RTA_EQUIPMENT_PARTS = (
+    "Weapon", "Head", "Body", "Necklace", "Ring", "Shoes",
+)
+
+
+def rta_role_sets(role):
+    counts = Counter()
+    equipment_map = role.get("EquipmentMap") or {}
+    for part in RTA_EQUIPMENT_PARTS:
+        equipment = equipment_map.get(part) or {}
+        set_id = equipment.get("Set")
+        if set_id:
+            counts[set_id] += 1
+
+    descriptions = []
+    for set_id, owned in counts.most_common():
+        row = MASTER.equipment_sets.get(set_id) if MASTER else None
+        required = int((row or {}).get("Count") or 1)
+        active = owned // max(required, 1)
+        if active <= 0:
+            continue
+        prefix = str(active) if active > 1 else ""
+        name = MASTER.equipment_set_name(set_id) if MASTER else set_id
+        descriptions.append(f"{prefix}{name}")
+    return "".join(descriptions)
+
+
+def format_rta_role(role):
+    stats = calculate_role_stats(role)
+    artifact = role.get("ArtifactData") or {}
+    artifact_id = artifact.get("StaticID")
+    artifact_text = ""
+    if artifact_id:
+        artifact_name = (
+            MASTER.artifact_name(artifact_id) if MASTER else artifact_id
+        )
+        artifact_text = f"{artifact.get('LV') or 1}级{artifact_name}"
+    description = rta_role_sets(role) + artifact_text
+    role_id = role.get("StaticID", "")
+    role_name = MASTER.role_name(role_id) if MASTER else role_id
+    return (
+        f"{role_name}：{description}("
+        f"{round(stats.get('Speed', 0))}速"
+        f"{round(stats.get('HP', 0))}生"
+        f"{round(stats.get('Defence', 0))}防"
+        f"{round(stats.get('EffectHitRate', 0) * 100)}命"
+        f"{round(stats.get('ResistanceRate', 0) * 100)}抗"
+        f"{round(stats.get('Attack', 0))}攻"
+        f"{round(stats.get('CriticalRate', 0) * 100)}暴"
+        f"{round(stats.get('CriticalDamageRate', 0) * 100)}爆)"
+    )
+
+
 def iter_team_maps(start_info):
     for side, key in (("1", "CampData1"), ("2", "CampData2")):
         role_map = (start_info.get(key) or {}).get("PositionRoleMap") or {}
@@ -486,17 +540,18 @@ def iter_team_maps(start_info):
                 yield "1", wave, role_map
 
 
-def build_role_info(start_info):
+def build_role_info(start_info, ally_side="1"):
     result = {}
     for side, wave, role_map in iter_team_maps(start_info):
         positions = sorted(role_map, key=lambda position: int(position))
         roles = [role_map[position] for position in positions]
+        is_ally = side == ally_side
         team_stats = (
-            calculate_team_stats(roles) if side == "1" else [None] * len(roles)
+            calculate_team_stats(roles) if is_ally else [None] * len(roles)
         )
         solo_stats = (
             [calculate_role_stats(role) for role in roles]
-            if side == "1" else [None] * len(roles)
+            if is_ally else [None] * len(roles)
         )
         for position, role, stats, solo in zip(
             positions, roles, team_stats, solo_stats
@@ -507,6 +562,7 @@ def build_role_info(start_info):
                 "name": MASTER.role_name(role.get("StaticID", "")),
                 "static_id": role.get("StaticID", ""),
                 "side": side,
+                "is_ally": is_ally,
                 "speed": speed,
                 "speed_imprint_affected": bool(
                     stats and solo
@@ -520,11 +576,19 @@ def build_ally_role_info(role_map):
     return build_role_info({"CampData1": {"PositionRoleMap": role_map}})
 
 
-def prepare_battles_from_packet(data):
+def prepare_battles_from_packet(data, rta_local_camp=None):
     """Normalize all known battle setup packets into one queue format."""
     start_info = data.get("StartBattleInfo")
     if isinstance(start_info, dict):
-        return [PreparedBattle(build_role_info(start_info))]
+        scene_id = (start_info.get("SceneData") or {}).get("StaticID")
+        ally_side = (
+            str(rta_local_camp)
+            if scene_id == "RTA" and rta_local_camp in (1, 2)
+            else "1"
+        )
+        return [PreparedBattle(
+            build_role_info(start_info, ally_side), ally_side=ally_side
+        )]
 
     team_group = data.get("PlayerTeamGroup")
     if isinstance(team_group, dict):
@@ -559,17 +623,183 @@ class SpeedAnalyzer:
         self.gvg_battle_active = False
         self.awaiting_gvg_start = False
         self.exact_mode = exact_mode
+        self.ally_side = "1"
         self.last_end_times = None
+        self.reset_rta_state()
         self.reset_phase_state()
 
-    def handle_packet(self, _tag, text):
+    def reset_rta_state(self):
+        self.rta_id = None
+        self.rta_local_aid = None
+        self.rta_players = []
+        self.rta_local_camp = None
+        self.rta_local_team_role_ids = set()
+        self.rta_roles = {1: {}, 2: {}}
+        self.rta_role_order = {1: [], 2: []}
+        self.rta_printed_heading = False
+        self.rta_printed_player = False
+        self.rta_printed_roles = set()
+
+    @staticmethod
+    def rta_camp(value):
+        try:
+            camp = int(value)
+        except (TypeError, ValueError):
+            return None
+        return camp if camp in (1, 2) else None
+
+    @staticmethod
+    def rta_object_id(value):
+        if isinstance(value, dict):
+            value = value.get("$oid")
+        return str(value) if value not in (None, "") else None
+
+    def rta_opponent_camp(self):
+        if self.rta_local_camp not in (1, 2):
+            return None
+        return 3 - self.rta_local_camp
+
+    def set_rta_local_camp(self, value):
+        camp = self.rta_camp(value)
+        if camp is None:
+            return
+        self.rta_local_camp = camp
+
+    def remember_rta_role(self, camp, role):
+        camp = self.rta_camp(camp)
+        if camp is None or not isinstance(role, dict):
+            return None
+        role_key = role.get("_id") or role.get("StaticID")
+        if not role_key:
+            return None
+        is_new = role_key not in self.rta_roles[camp]
+        self.rta_roles[camp][role_key] = role
+        if is_new:
+            self.rta_role_order[camp].append(role_key)
+        return camp, role_key, is_new
+
+    def print_rta_heading(self):
+        opponent_camp = self.rta_opponent_camp()
+        if not self.exact_mode or opponent_camp is None:
+            return
+        if not self.rta_printed_heading:
+            print("\n===== RTA 对手情报 =====")
+            self.rta_printed_heading = True
+        if self.rta_printed_player or len(self.rta_players) < opponent_camp:
+            return
+        player = self.rta_players[opponent_camp - 1] or {}
+        leader_id = player.get("LeaderSID", "")
+        leader = MASTER.role_name(leader_id) if MASTER else leader_id
+        print(
+            f"1. {player.get('Name', '')}（{leader}-{player.get('CUID', '')}）"
+        )
+        self.rta_printed_player = True
+
+    def print_rta_role(self, camp, role_key):
+        signature = (camp, role_key)
+        if not self.exact_mode or signature in self.rta_printed_roles:
+            return
+        if camp != self.rta_opponent_camp():
+            return
+        self.print_rta_heading()
+        role = self.rta_roles[camp].get(role_key)
+        if role:
+            print(format_rta_role(role))
+            self.rta_printed_roles.add(signature)
+
+    def print_rta_snapshot(self):
+        if not self.exact_mode or self.rta_opponent_camp() is None:
+            return
+        self.print_rta_heading()
+        opponent_camp = self.rta_opponent_camp()
+        for role_key in self.rta_role_order[opponent_camp]:
+            self.print_rta_role(opponent_camp, role_key)
+
+    def infer_rta_camp_from_start(self, start_info):
+        if self.rta_local_camp in (1, 2) or not self.rta_local_team_role_ids:
+            return
+        for camp in (1, 2):
+            role_map = (
+                (start_info.get(f"CampData{camp}") or {})
+                .get("PositionRoleMap") or {}
+            )
+            role_ids = {
+                role.get("_id")
+                for role in role_map.values()
+                if isinstance(role, dict) and role.get("_id")
+            }
+            if role_ids and role_ids == self.rta_local_team_role_ids:
+                self.set_rta_local_camp(camp)
+                return
+
+    def handle_rta_packet(self, tag, data):
+        if tag == "SEND" and "RoomDBInfo" in data:
+            self.reset_rta_state()
+            self.rta_local_aid = self.rta_object_id(data.get("AID"))
+
+        rta_info = data.get("RTAInfo")
+        if isinstance(rta_info, dict):
+            rta_id = rta_info.get("RTAID")
+            if self.rta_id and rta_id and rta_id != self.rta_id:
+                self.reset_rta_state()
+            self.rta_id = rta_id or self.rta_id
+            players = rta_info.get("PlayerInfos")
+            if isinstance(players, list):
+                self.rta_players = players
+                if self.rta_local_aid:
+                    for index, player in enumerate(players[:2], 1):
+                        if self.rta_object_id(
+                            (player or {}).get("_id")
+                        ) == self.rta_local_aid:
+                            self.set_rta_local_camp(index)
+                            break
+                self.print_rta_snapshot()
+
+        preban = data.get("RTABattlePreBanCMD")
+        if isinstance(preban, dict):
+            camp = self.rta_camp(preban.get("Camp"))
+            if tag == "SEND":
+                self.set_rta_local_camp(camp)
+            self.print_rta_snapshot()
+
+        request = data.get("Request")
+        if request == "SelectRole":
+            camp = self.rta_camp(data.get("Camp"))
+            if tag == "SEND":
+                self.set_rta_local_camp(camp)
+            remembered = self.remember_rta_role(camp, data.get("RoleData"))
+            if remembered:
+                remembered_camp, role_key, _ = remembered
+                self.print_rta_role(remembered_camp, role_key)
+        elif request == "SetTeam" and tag == "SEND":
+            role_map = (data.get("TeamData") or {}).get("PositionRoleMap") or {}
+            self.rta_local_team_role_ids = {
+                role.get("_id")
+                for role in role_map.values()
+                if isinstance(role, dict) and role.get("_id")
+            }
+
+        start_info = data.get("StartBattleInfo")
+        if isinstance(start_info, dict):
+            self.infer_rta_camp_from_start(start_info)
+            for camp in (1, 2):
+                role_map = (
+                    (start_info.get(f"CampData{camp}") or {})
+                    .get("PositionRoleMap") or {}
+                )
+                for role in role_map.values():
+                    self.remember_rta_role(camp, role)
+            self.print_rta_snapshot()
+
+    def handle_packet(self, tag, text):
         try:
             data = json.loads(text)
         except (TypeError, json.JSONDecodeError):
             return
         if not isinstance(data, dict):
             return
-        prepared = prepare_battles_from_packet(data)
+        self.handle_rta_packet(tag, data)
+        prepared = prepare_battles_from_packet(data, self.rta_local_camp)
         if prepared is not None:
             self.pending_battles = deque(prepared)
             self.awaiting_gvg_start = self.has_pending_gvg_battle()
@@ -597,7 +827,9 @@ class SpeedAnalyzer:
         prepared = self.pending_battles.popleft()
         if not prepared.role_info:
             return False
-        self.start_battle(prepared.role_info, prepared.label)
+        self.start_battle(
+            prepared.role_info, prepared.label, prepared.ally_side
+        )
         self.awaiting_gvg_start = False
         return True
 
@@ -622,19 +854,33 @@ class SpeedAnalyzer:
             and self.is_gvg_opening_result(step, round_result)
         )
 
-    def start_battle(self, role_info, label=""):
+    def start_battle(self, role_info, label="", ally_side="1"):
         self.role_info = role_info
+        self.ally_side = ally_side
         self.gvg_battle_active = label in ("上半场", "下半场")
         ally_waves = {
             role_id.split("-")[1]
             for role_id in role_info
-            if role_id.startswith("1-") and role_id.count("-") == 2
+            if self.is_ally_role(role_id) and role_id.count("-") == 2
         }
         self.wave_phase = 0
         self.wave_phase_count = max(len(ally_waves), 1)
         if not label and self.wave_phase_count > 1:
             label = self.phase_name(0)
         self.start_phase(label)
+
+    def is_ally_role(self, role_id):
+        return (
+            isinstance(role_id, str)
+            and role_id.startswith(f"{self.ally_side}-")
+        )
+
+    def is_enemy_role(self, role_id):
+        return (
+            isinstance(role_id, str)
+            and role_id.count("-") == 2
+            and not self.is_ally_role(role_id)
+        )
 
     def reset_phase_state(self):
         self.start_times = None
@@ -696,7 +942,7 @@ class SpeedAnalyzer:
                 return
             role_ids = set(self.start_times) | set(times)
             has_ally_reference = any(
-                role_id.startswith("1-")
+                self.is_ally_role(role_id)
                 and self.role_info.get(role_id, {}).get("speed")
                 for role_id in role_ids
             )
@@ -722,7 +968,7 @@ class SpeedAnalyzer:
         for event in events:
             action = (event or {}).get("Action") or {}
             role_id = action.get("SourceID")
-            if isinstance(role_id, str) and role_id.startswith("2-"):
+            if self.is_enemy_role(role_id):
                 skill_id = (action.get("SkillData") or {}).get("StaticID")
                 static_id = role_static_id_from_skill(skill_id)
                 if static_id and self.enemy_roles.get(role_id) != static_id:
@@ -730,7 +976,8 @@ class SpeedAnalyzer:
                     self.role_info.setdefault(role_id, {}).update({
                         "name": MASTER.role_name(static_id),
                         "static_id": static_id,
-                        "side": "2",
+                        "side": role_id.split("-", 1)[0],
+                        "is_ally": False,
                         "speed": None,
                     })
                     if self.printed:
@@ -743,8 +990,7 @@ class SpeedAnalyzer:
                 artifact_id = tip.get("ID")
                 if (
                     tip.get("Tip") == "Artifect"
-                    and isinstance(owner_id, str)
-                    and owner_id.startswith("2-")
+                    and self.is_enemy_role(owner_id)
                     and isinstance(artifact_id, str)
                     and artifact_id
                 ):
@@ -764,7 +1010,7 @@ class SpeedAnalyzer:
 
     def update_enemy_max_hp(self, role_event):
         role_id = role_event.get("TargetRoleID")
-        if not isinstance(role_id, str) or not role_id.startswith("2-"):
+        if not self.is_enemy_role(role_id):
             return
 
         hit_info = role_event.get("HitInfo") or {}
@@ -862,7 +1108,10 @@ class SpeedAnalyzer:
     def toggle_display_mode(self):
         self.exact_mode = not self.exact_mode
         mode = "精确测速" if self.exact_mode else "百分比区间测速"
-        print(f"\n[显示模式] 已切换为{mode}")
+        intel = "开启" if self.exact_mode else "关闭"
+        print(f"\n[显示模式] 已切换为{mode}，RTA 隐藏情报已{intel}")
+        if self.exact_mode:
+            self.print_rta_snapshot()
         if self.last_end_times is not None:
             self.print_speed_report(self.last_end_times)
 
@@ -891,7 +1140,8 @@ class SpeedAnalyzer:
             speed = info.get("speed")
             rows.append({
                 "role_id": role_id,
-                "side": "我方" if role_id.startswith("1-") else "敌方",
+                "side": "我方" if self.is_ally_role(role_id) else "敌方",
+                "is_ally": self.is_ally_role(role_id),
                 "name": info.get("name") or info.get("static_id") or "?",
                 "start": start,
                 "end": end,
@@ -902,7 +1152,7 @@ class SpeedAnalyzer:
                 "speed": speed,
             })
             if (
-                role_id.startswith("1-")
+                self.is_ally_role(role_id)
                 and speed
                 and delta
                 and delta > 0
@@ -942,7 +1192,7 @@ class SpeedAnalyzer:
         if self.exact_mode:
             for row in rows:
                 speed = row["speed"]
-                if row["role_id"].startswith("2-"):
+                if not row["is_ally"]:
                     speed = exact_estimates.get(row["role_id"], "-")
                 table_rows.append([
                     row["side"],
@@ -961,7 +1211,7 @@ class SpeedAnalyzer:
 
         for row in rows:
             estimate = range_estimates.get(row["role_id"])
-            if row["role_id"].startswith("1-"):
+            if row["is_ally"]:
                 interval = (
                     f"[{row['speed']}–{row['speed']}]"
                     if row["speed"]
@@ -999,7 +1249,7 @@ class SpeedAnalyzer:
         if not ally_refs:
             return result
         for row in rows:
-            if not row["role_id"].startswith("2-") or row["delta"] is None:
+            if row["is_ally"] or row["delta"] is None:
                 continue
             values = [
                 ally_speed / ally_delta * row["delta"]
@@ -1022,7 +1272,7 @@ class SpeedAnalyzer:
         return {
             row["role_id"]: estimate
             for row in rows
-            if row["role_id"].startswith("2-")
+            if not row["is_ally"]
             for estimate in [
                 estimate_quantized_speed(row["delta_interval"], ally_refs)
             ]

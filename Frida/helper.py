@@ -508,10 +508,19 @@ class MasterData:
             except sqlite3.OperationalError:
                 pass
             self.artifact_name_keys = artifact_name_keys
+            self.equipment_set_name_keys = {
+                set_id: row.get("Name")
+                for set_id, row in self.equipment_sets.items()
+                if row.get("Name")
+            }
             role_names = {
                 row.get("NAME") for row in self.roles.values() if row.get("NAME")
             }
-            localized_names = role_names | set(artifact_name_keys.values())
+            localized_names = (
+                role_names
+                | set(artifact_name_keys.values())
+                | set(self.equipment_set_name_keys.values())
+            )
             self.localization = {
                 row["Key"]: row["Value"]
                 for row in conn.execute("SELECT Key, Value FROM CHS")
@@ -549,6 +558,16 @@ class MasterData:
         if name_key.startswith(("T_", "UI_")):
             return self.localization.get(name_key) or artifact_id
         return name_key
+
+    def equipment_set_name(self, set_id):
+        name_key = self.equipment_set_name_keys.get(set_id)
+        if not name_key:
+            return set_id
+        if name_key.startswith(("T_", "UI_")):
+            name = self.localization.get(name_key) or set_id
+        else:
+            name = name_key
+        return name.removesuffix("套装")
 
 
 MASTER: MasterData | None = None
