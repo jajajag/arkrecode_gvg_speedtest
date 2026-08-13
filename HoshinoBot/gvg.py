@@ -11,6 +11,7 @@ from .queries import (
     format_player,
     format_solutions,
     format_win_rates,
+    format_wrongbook,
     resolve_member_info_target,
     resolve_roles,
     set_max_speed,
@@ -61,6 +62,7 @@ GVG_HELP = (
     '团战 作业 角色1 角色2 角色3\n'
     '团战 防守\n'
     '团战 胜率表\n'
+    '团战 错题本 团名 [场数，最多10场]\n'
     '团战 一速 玩家名或UID 速度\n'
     '团战 信息 玩家名或UID 内容或图片\n'
     '团战 历史 玩家名或UID\n'
@@ -216,6 +218,20 @@ def register_gvg(service):
                 message = format_win_rates()
             except Exception as exc:
                 message = '查询失败：{}'.format(exc)
+            await bot.send(ev, _format_query_reply(message), at_sender=False)
+            return
+
+        if raw == '错题本' or re.match(r'错题本\s', raw):
+            content = raw[len('错题本'):].strip()
+            match = re.fullmatch(r'(.+?)(?:\s+(\d+))?', content)
+            if not match:
+                message = '格式：团战 错题本 团名 [场数，最多10场]'
+            else:
+                try:
+                    message = format_wrongbook(
+                        match.group(1), match.group(2) or 1)
+                except Exception as exc:
+                    message = '查询失败：{}'.format(exc)
             await bot.send(ev, _format_query_reply(message), at_sender=False)
             return
 
