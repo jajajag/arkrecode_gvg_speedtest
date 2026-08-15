@@ -23,6 +23,8 @@ MILLIS_PER_DAY = 24 * 60 * 60 * 1000
 INFO_FORMAT = 'gvg_info_v1'
 MAX_WRONGBOOK_MATCHES = 10
 GVG_TIMEZONE = timezone(timedelta(hours=8))
+GVG_MATCH_START_HOUR = 8
+GVG_MATCH_START_WEEKDAYS = frozenset((0, 2, 4))  # Monday, Wednesday, Friday
 
 
 def encode_info_segments(segments):
@@ -141,10 +143,20 @@ def _role_name_map():
         return {}
 
 
-def _gvg_date(start_ts):
-    return datetime.fromtimestamp(
+def _gvg_match_date(start_ts):
+    """Return the Beijing-time start date of the GVG match containing a log.
+
+    Matches run from 08:00 Monday/Wednesday/Friday until 08:00 the following
+    day.  Shifting by eight hours makes the whole match share its start date;
+    the weekday check excludes timestamps from the intervals between matches.
+    """
+    local_time = datetime.fromtimestamp(
         int(start_ts) / 1000, timezone.utc
-    ).astimezone(GVG_TIMEZONE).strftime('%Y-%m-%d')
+    ).astimezone(GVG_TIMEZONE)
+    match_day = local_time - timedelta(hours=GVG_MATCH_START_HOUR)
+    if match_day.weekday() not in GVG_MATCH_START_WEEKDAYS:
+        return None
+    return match_day.strftime('%Y-%m-%d')
 
 
 def _resolve_attack_guild(conn, query):
@@ -171,25 +183,25 @@ def _resolve_attack_guild(conn, query):
     return None, '没有找到“{}”的进攻记录。'.format(query)
 
 
-def _recent_gvg_dates(conn, atk_guild, limit):
-    dates = []
+def _recent_gvg_matches(conn, atk_guild, limit):
+    matches = []
     seen = set()
     for row in conn.execute(
             'SELECT start_ts FROM gvg_rounds '
             'WHERE atk_guild = ? ORDER BY start_ts DESC',
             (atk_guild,)):
-        date = _gvg_date(row['start_ts'])
-        if date in seen:
+        match_date = _gvg_match_date(row['start_ts'])
+        if match_date is None or match_date in seen:
             continue
-        seen.add(date)
-        dates.append(date)
-        if len(dates) >= limit:
+        seen.add(match_date)
+        matches.append(match_date)
+        if len(matches) >= limit:
             break
-    return dates
+    return matches
 
 
-def _wrongbook_failures(conn, atk_guild, dates):
-    selected_dates = set(dates)
+def _wrongbook_failures(conn, atk_guild, match_dates):
+    selected_dates = set(match_dates)
     units = defaultdict(lambda: {'atk': [], 'def': []})
     for row in conn.execute(
         '''
@@ -206,14 +218,14 @@ def _wrongbook_failures(conn, atk_guild, dates):
             row)
 
     grouped = {date: defaultdict(lambda: defaultdict(set))
-               for date in dates}
+               for date in match_dates}
     for row in conn.execute(
         'SELECT * FROM gvg_rounds '
         'WHERE atk_guild = ? AND win = 0 '
         'ORDER BY start_ts, battle_id, round_idx',
         (atk_guild,),
     ):
-        date = _gvg_date(row['start_ts'])
+        date = _gvg_match_date(row['start_ts'])
         if date not in selected_dates:
             continue
         teams = units[(row['battle_id'], int(row['round_idx']))]
@@ -269,17 +281,17 @@ def format_wrongbook(guild_query, match_count=1, db_path=DATA_DB_PATH):
         atk_guild, error = _resolve_attack_guild(conn, guild_query)
         if error:
             return error
-        dates = _recent_gvg_dates(conn, atk_guild, match_count)
-        if not dates:
+        match_dates = _recent_gvg_matches(conn, atk_guild, match_count)
+        if not match_dates:
             return '没有找到“{}”的进攻记录。'.format(atk_guild)
-        failures = _wrongbook_failures(conn, atk_guild, dates)
+        failures = _wrongbook_failures(conn, atk_guild, match_dates)
     finally:
         conn.close()
 
     roles = _role_name_map()
     return '\n\n'.join(
         _wrongbook_section(date, atk_guild, failures[date], roles)
-        for date in dates
+        for date in match_dates
     )
 
 
