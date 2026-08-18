@@ -8,16 +8,16 @@ from pathlib import Path
 import hoshino
 from hoshino import Service, priv
 
-from .HoshinoBot.api import MAIN_ACCOUNT, get_shared_game_client
+from .HoshinoBot.api import get_sub_game_client
 
 
 # 只需把 0 改成接收消息的 QQ 号。
 QQ_ID = 0
 
-# 其余设置通常不需要修改。
+# 游戏登录不在这里配置：直接复用 HoshinoBot/data/account.json 中的
+# SubAccount 共享客户端。MainAccount 留给正常团战更新使用。
 TRACKED_CUID = 104827882
 RANKS = (1, 2, 3, 50)
-GAME_ACCOUNT = MAIN_ACCOUNT
 BOT_SELF_ID = None  # 多个 Bot QQ 同时在线时，可填写指定的 Bot QQ；否则随机选一个。
 
 THIS_FILE = Path(__file__).resolve()
@@ -33,7 +33,8 @@ sv = Service(
 
 
 def _query_rank_data():
-    client = get_shared_game_client(GAME_ACCOUNT)
+    # 复用进程内既有客户端及其请求锁，不创建新登录、不覆盖团战会话。
+    client = get_sub_game_client()
     return client.call(
         'RTARankBattleHandler.QueryRankList',
         {},
