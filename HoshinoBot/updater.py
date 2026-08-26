@@ -5,14 +5,12 @@ import requests
 
 from .api import (
     GameRequestError,
-    get_main_game_client,
-    get_sub_game_client,
+    get_game_client,
     oid,
     query_bulletin,
     query_battle_detail,
-    query_full_guild_war_data,
     query_member_logs,
-    query_pvp_rank,
+    query_guild,
     query_top_guilds,
 )
 from .database import (
@@ -24,11 +22,11 @@ from .database import (
     init_database,
     meta_get,
     meta_set,
-    replace_defenses,
+    replace_current_members,
     save_battle_rows,
-    save_pvp_equips,
     update_our_guild_meta,
 )
+from .daily import run_daily_cleanup
 from .master import update_master_db
 
 # Borrowed from StardustChocolate/openrubi
@@ -38,53 +36,61 @@ ALIAS_URL = (
 )
 
 
-def camp_guild_info(camp):
-    info = (camp or {}).get('GuildInfo') or {}
+def partial_guild_info(data):
+    guild = (data or {}).get('GuildData') or {}
+    info = guild.get('GuildInfo') or guild.get('GuildSubInfo') or guild
     return {
-        'id': oid(info.get('_id')),
-        'name': str(info.get('Name') or ''),
+        'id': oid(info.get('_id') or guild.get('_id')),
+        'name': str(info.get('Name') or guild.get('Name') or ''),
     }
 
 
-def camp_defense_members(camp):
+def partial_enemy_guild_id(data):
+    if isinstance(data, dict):
+        candidate = data.get('EnemyGuildID')
+        if candidate:
+            return oid(candidate)
+        for value in data.values():
+            guild_id = partial_enemy_guild_id(value)
+            if guild_id:
+                return guild_id
+    elif isinstance(data, list):
+        for value in data:
+            guild_id = partial_enemy_guild_id(value)
+            if guild_id:
+                return guild_id
+    return ''
+
+
+def guild_members(guild_data):
+    guild = guild_data.get('GuildData') or {}
+    members = None
+    for source in (guild, guild_data):
+        for key in ('MemberList', 'MemberInfoList'):
+            if key in source:
+                members = source[key]
+                break
+        if members is not None:
+            break
+    if not isinstance(members, list):
+        raise GameRequestError('公会响应缺少成员列表')
+    return members
+
+
+def guild_member_snapshots(guild_data):
     result = []
-    for order, item in enumerate((camp or {}).get('PlayerInfoList') or [], 1):
-        player = item.get('PlayerInfo') or {}
-        defense = item.get('DefenceTeamData') or {}
-        teams = {}
-        for key, source in (('first', 'FirstTeam'), ('second', 'SecondTeam')):
-            role_map = ((defense.get(source) or {}).get(
-                'PositionRoleMap') or {})
-            team = sorted(
-                ((int(pos), str((role or {}).get('StaticID') or ''))
-                 for pos, role in role_map.items()),
-                key=lambda unit: unit[0],
-            )
-            if len(team) != 3 or any(not role_id for _, role_id in team):
-                raise GameRequestError(
-                    '{} 的 GuildWarData 防守阵容不完整'.format(
-                        player.get('Name') or player.get('CUID') or order))
-            teams[key] = team
+    for order, member in enumerate(guild_members(guild_data), 1):
+        player = member.get('PlayerInfo') or member
         cuid = player.get('CUID')
         if cuid is None:
-            raise GameRequestError('GuildWarData 中有成员缺少 CUID')
+            raise GameRequestError('公会成员中有成员缺少 CUID')
         result.append({
             'cuid': int(cuid),
             'name': str(player.get('Name') or cuid),
             'avatar_role_id': str(player.get('LeaderSID') or ''),
             'order': order,
-            'first': teams['first'],
-            'second': teams['second'],
         })
     return result
-
-
-def guild_members(guild_data):
-    guild = guild_data.get('GuildData') or {}
-    members = guild.get('MemberList')
-    if not isinstance(members, list):
-        raise GameRequestError('公会响应缺少 GuildData.MemberList')
-    return members
 
 
 def collect_gvg_battle_refs(client, guild_data_list):
@@ -249,16 +255,19 @@ def update_master(bulletin, http):
 
 def update_all_sync():
     init_database()
-    main_client = get_main_game_client()
-    main_client.login(attempts=3)
-    full_data = query_full_guild_war_data(main_client)
-    guild_war = full_data.get('GuildWarData') or {}
-    my_camp = guild_war.get('MyCampData') or {}
-    enemy_camp = guild_war.get('EnemyCampData')
-    our_guild = camp_guild_info(my_camp)
+    client = get_game_client()
+    client.login(attempts=3, force=True)
+    our_guild_id = str(client.config.get('GuildID') or '').strip()
+    if not our_guild_id:
+        raise GameRequestError('account.json 缺少 GuildID')
+
+    our_guild_data = query_guild(client, our_guild_id)
+    our_guild = partial_guild_info(our_guild_data)
     if not our_guild['name']:
-        raise GameRequestError('GuildWarData 缺少我方团信息')
+        raise GameRequestError('公会响应缺少我方团信息')
+    our_guild['id'] = our_guild['id'] or our_guild_id
     update_our_guild_meta(our_guild)
+    enemy_guild_id = partial_enemy_guild_id(our_guild_data)
 
     warnings = []
     master_changed = False
@@ -278,43 +287,47 @@ def update_all_sync():
     result = {
         'our_guild': our_guild['name'],
         'enemy_guild': None,
-        'defenses': None,
+        'members': None,
         'battles': None,
-        'pvp_equips': None,
         'ranked_guilds': None,
         'aliases': alias_count,
         'master_changed': master_changed,
         'warnings': warnings,
     }
 
-    if enemy_camp:
-        enemy_guild = camp_guild_info(enemy_camp)
+    if enemy_guild_id:
+        enemy_guild_data = query_guild(client, enemy_guild_id)
+        enemy_guild = partial_guild_info(enemy_guild_data)
         if not enemy_guild['name']:
-            raise GameRequestError('GuildWarData 缺少敌方团信息')
-        members = camp_defense_members(enemy_camp)
+            raise GameRequestError('公会响应缺少敌方团信息')
+        enemy_guild['id'] = enemy_guild['id'] or enemy_guild_id
+        members = guild_member_snapshots(enemy_guild_data)
         if not members:
-            raise GameRequestError('GuildWarData 敌方阵营没有成员防守数据')
-        replace_defenses(members, enemy_guild)
+            raise GameRequestError('敌方公会没有成员数据')
+        replace_current_members(members, enemy_guild)
         result['enemy_guild'] = enemy_guild['name']
-        result['defenses'] = len(members)
+        result['members'] = len(members)
+        battle_sources = [our_guild_data, enemy_guild_data]
     else:
-        sub_client = get_sub_game_client()
-        sub_client.login(attempts=3)
-        pvp_data = query_pvp_rank(sub_client)
-        result['pvp_equips'] = save_pvp_equips(pvp_data)
-        ranked_guilds = query_top_guilds(sub_client)
+        ranked_guilds = query_top_guilds(client)
         result['ranked_guilds'] = len(ranked_guilds)
-        battle_result = update_gvg_battles(sub_client, ranked_guilds)
-        result['battles'] = battle_result['saved']
-        if battle_result['member_failures']:
-            warnings.append('前20团有 {} 名成员日志查询失败，已跳过'.format(
-                battle_result['member_failures']))
-        if battle_result['detail_failures']:
-            warnings.append('有 {} 场战斗详情查询失败，已跳过'.format(
-                battle_result['detail_failures']))
-        if battle_result['parse_failures']:
-            warnings.append('有 {} 场战斗详情解析失败，已跳过'.format(
-                battle_result['parse_failures']))
+        battle_sources = ranked_guilds
+    battle_result = update_gvg_battles(client, battle_sources)
+    result['battles'] = battle_result['saved']
+    if battle_result['member_failures']:
+        warnings.append('有 {} 名成员日志查询失败，已跳过'.format(
+            battle_result['member_failures']))
+    if battle_result['detail_failures']:
+        warnings.append('有 {} 场战斗详情查询失败，已跳过'.format(
+            battle_result['detail_failures']))
+    if battle_result['parse_failures']:
+        warnings.append('有 {} 场战斗详情解析失败，已跳过'.format(
+            battle_result['parse_failures']))
+    try:
+        daily_result = run_daily_cleanup(client, client.login_data)
+        warnings.extend(daily_result['warnings'])
+    except Exception as exc:
+        warnings.append('日常清理失败：{}'.format(exc))
     return result
 
 
@@ -325,12 +338,10 @@ def update_result_text(result):
             result['our_guild'], result['enemy_guild']))
     else:
         parts.append('今日未开启团战')
-    if result['pvp_equips'] is not None:
-        parts.append('PVP装备更新 {} 件'.format(result['pvp_equips']))
     if result['ranked_guilds'] is not None:
         parts.append('前排团 {} 个'.format(result['ranked_guilds']))
-    if result['defenses'] is not None:
-        parts.append('防守 {} 人'.format(result['defenses']))
+    if result['members'] is not None:
+        parts.append('敌方成员 {} 人'.format(result['members']))
     if result['battles'] is not None:
         parts.append('团战战斗新增 {} 场'.format(result['battles']))
     parts.append('别名 {} 条'.format(result['aliases']))

@@ -311,7 +311,7 @@ def _current_members(conn):
         SELECT m.*, d.snapshot_date, d.sort_order,
                d.upper_1_role_id, d.upper_2_role_id, d.upper_3_role_id,
                d.lower_1_role_id, d.lower_2_role_id, d.lower_3_role_id
-        FROM gvg_defences AS d
+        FROM gvg_current_members AS d
         JOIN gvg_members AS m ON m.cuid = d.cuid
         ORDER BY d.sort_order, m.cuid
         ''').fetchall()
@@ -478,36 +478,6 @@ def format_solutions(role_ids, db_path=DATA_DB_PATH):
         sections.append('\n'.join(_solution_lines(
             '整体解法：', ranked, roles)))
     return defense + '\n' + '\n'.join(sections)
-
-
-def format_defenses(db_path=DATA_DB_PATH):
-    init_database(db_path)
-    conn = connect_data(db_path)
-    try:
-        context = _guild_context(conn)
-        members = _current_members(conn)
-    finally:
-        conn.close()
-    if not members:
-        return '暂无{}防守数据，请先更新。'.format(context['enemy']['name'])
-    roles = _role_name_map()
-    date = members[0]['snapshot_date']
-    title = '{} {}防守'.format(date, context['enemy']['name'])
-    blocks = []
-    for index, member in enumerate(members, 1):
-        avatar = roles.get(member['avatar_role_id'], member['avatar_role_id'])
-        upper = (member['upper_1_role_id'], member['upper_2_role_id'],
-                 member['upper_3_role_id'])
-        lower = (member['lower_1_role_id'], member['lower_2_role_id'],
-                 member['lower_3_role_id'])
-        first = '+'.join(roles.get(role, role) for role in upper if role) or '-'
-        second = '+'.join(roles.get(role, role) for role in lower if role) or '-'
-        blocks.append('\n'.join((
-            '{:02d}. {}（{}）'.format(index, member['name'], avatar),
-            '上半：{}'.format(first),
-            '下半：{}'.format(second),
-        )))
-    return title + '\n' + '\n'.join(blocks)
 
 
 def member_defense_stats(conn, cuid, def_guild_name, atk_guild_name=None):

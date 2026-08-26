@@ -13,8 +13,6 @@ import requests
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / 'data'
 ACCOUNT_PATH = DATA_DIR / 'account.json'
-MAIN_ACCOUNT = 'MainAccount'
-SUB_ACCOUNT = 'SubAccount'
 
 GAME_URL = 'https://game-arkre-labs.ecchi.xxx/Router/RouterHandler.ashx'
 TOKEN_URL = 'https://sadpki-portal-v2.ebuajk.com/api/v2/token/access'
@@ -126,26 +124,22 @@ def _read_account_file(path):
     return config
 
 
-def load_config(account, path=ACCOUNT_PATH):
+def load_config(path=ACCOUNT_PATH):
     with _ACCOUNT_FILE_LOCK:
         config = _read_account_file(path)
-    account_config = config.get(account)
-    if not isinstance(account_config, dict):
-        raise ConfigError('account.json 缺少账号节点：{}'.format(account))
-    required = ('Name', 'Token')
+    required = ('Token', 'GuildID')
     missing = [key for key in required
-               if not str(account_config.get(key, '')).strip()]
+               if not str(config.get(key, '')).strip()]
     if missing:
-        raise ConfigError('account.json 的 {} 缺少：{}'.format(
-            account, '、'.join(missing)))
-    return dict(account_config)
+        raise ConfigError('account.json 缺少：{}'.format('、'.join(missing)))
+    return dict(config)
 
 
-def save_config(account, account_config, path=ACCOUNT_PATH):
+def save_config(account_config, path=ACCOUNT_PATH):
     path = Path(path)
     with _ACCOUNT_FILE_LOCK:
         config = _read_account_file(path)
-        config[account] = dict(account_config)
+        config.update(dict(account_config))
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.with_suffix(path.suffix + '.tmp')
         with temp_path.open('w', encoding='utf-8') as file:
@@ -154,17 +148,15 @@ def save_config(account, account_config, path=ACCOUNT_PATH):
 
 
 class GameClient:
-    def __init__(self, config, account=SUB_ACCOUNT,
-                 account_path=ACCOUNT_PATH, session=None):
+    def __init__(self, config, account_path=ACCOUNT_PATH, session=None):
         self.config = config
-        self.account = account
         self.account_path = Path(account_path)
         self.http = session or requests.Session()
         self.aid = None
         self.session_id = None
         self.cuid = None
         self.bulletin = None
-        self.rank_week = None
+        self.login_data = None
         self._request_lock = threading.RLock()
 
     def _post(self, url, payload=None, headers=None, timeout=60):
@@ -231,7 +223,7 @@ class GameClient:
             if not login_id or not login_token or not refresh_token:
                 raise GameRequestError('刷新 Token 的响应字段不完整')
             self.config['Token'] = refresh_token
-            save_config(self.account, self.config, self.account_path)
+            save_config(self.config, self.account_path)
 
         result = self._send_route('AccountHandler.Login', {
             'LoginID': login_id,
@@ -247,8 +239,7 @@ class GameClient:
         if not self.aid or not self.session_id or self.cuid is None:
             raise GameRequestError('登录响应缺少 AID、SessionID 或 CUID')
         self.bulletin = bulletin
-        self.rank_week = (((result.get('PVPData') or {}).get(
-            'PVPRankInfo') or {}).get('RankWeek'))
+        self.login_data = result
         return result
 
     def login(self, attempts=3, force=False):
@@ -262,7 +253,7 @@ class GameClient:
                 except Exception as exc:
                     last_error = exc
                     self.aid = self.session_id = self.cuid = None
-                    self.rank_week = None
+                    self.login_data = None
                     if attempt < attempts:
                         time.sleep(attempt)
             raise GameRequestError('连续登录 {} 次失败：{}'.format(
@@ -289,7 +280,7 @@ class GameClient:
                 except Exception as exc:
                     last_error = exc
                     self.aid = self.session_id = self.cuid = None
-                    self.rank_week = None
+                    self.login_data = None
                     if attempt < attempts:
                         self.login(attempts=3)
             raise GameRequestError(
@@ -341,23 +332,13 @@ _SHARED_CLIENTS = {}
 _SHARED_CLIENT_LOCK = threading.Lock()
 
 
-def get_shared_game_client(account):
-    """Return the process-wide client for one configured game account."""
-    if account not in (MAIN_ACCOUNT, SUB_ACCOUNT):
-        raise ConfigError('未知账号节点：{}'.format(account))
+def get_game_client():
+    """Return the process-wide client for the configured game account."""
     with _SHARED_CLIENT_LOCK:
-        if account not in _SHARED_CLIENTS:
-            _SHARED_CLIENTS[account] = GameClient(
-                load_config(account), account=account)
-        return _SHARED_CLIENTS[account]
-
-
-def get_main_game_client():
-    return get_shared_game_client(MAIN_ACCOUNT)
-
-
-def get_sub_game_client():
-    return get_shared_game_client(SUB_ACCOUNT)
+        key = 'default'
+        if key not in _SHARED_CLIENTS:
+            _SHARED_CLIENTS[key] = GameClient(load_config())
+        return _SHARED_CLIENTS[key]
 
 
 def query_guild(client, guild_id):
@@ -366,26 +347,6 @@ def query_guild(client, guild_id):
         {'GuildID': guild_id},
         delay=(0.8, 1.2),
         required_key='GuildData',
-    )
-
-
-def query_full_guild_war_data(client):
-    return client.call(
-        'GuildWarHandler.QueryFullGuildWarData',
-        {},
-        delay=(0.8, 1.2),
-        required_key='GuildWarData',
-    )
-
-
-def query_pvp_rank(client):
-    if client.rank_week is None:
-        raise GameRequestError('登录响应缺少 PVP RankWeek')
-    return client.call(
-        'PVPHandler.GetPVPRankList',
-        {'Week': client.rank_week},
-        delay=(0.8, 1.2),
-        required_key='PVPRankInfoList',
     )
 
 
@@ -408,34 +369,6 @@ def query_top_guilds(client):
     if not guilds:
         raise GameRequestError('团战排行榜前20名中没有可查询的佣兵团')
     return guilds
-
-
-def search_friend_players(client, query):
-    data = client.call(
-        'FriendHandler.SearchFriendList',
-        {'Name': query},
-        delay=(0.8, 1.2),
-    )
-    players = []
-    seen = set()
-    for player in data.get('FriendInfos') or []:
-        cuid = player.get('CUID')
-        if cuid is None or int(player.get('LV') or 0) <= 60:
-            continue
-        cuid = int(cuid)
-        if cuid in seen:
-            continue
-        seen.add(cuid)
-        players.append(player)
-    return players
-
-
-def query_player_card(client, cuid):
-    return client.call(
-        'AccountHandler.QueryPlayerCardData',
-        {'CUID': int(cuid)},
-        delay=(0.8, 1.2),
-    )
 
 
 def query_member_logs(client, cuid):

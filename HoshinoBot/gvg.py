@@ -6,7 +6,6 @@ from pathlib import Path
 from .api import BASE_DIR, INFO_IMAGE_LOCK, cache_info_images
 from .database import IMAGES_DIR, init_database
 from .queries import (
-    format_defenses,
     format_member_history,
     format_player,
     format_solutions,
@@ -17,7 +16,6 @@ from .queries import (
     set_max_speed,
     set_member_info,
 )
-from .speed import query_pvp_speeds_sync
 from .updater import update_all_sync, update_result_text
 
 
@@ -60,7 +58,6 @@ async def run_update_job(service, bot=None, ev=None, notify_superuser=True):
 GVG_HELP = (
     '团战指令：\n'
     '团战 作业 角色1 角色2 角色3\n'
-    '团战 防守\n'
     '团战 胜率表\n'
     '团战 错题本 团名 [场数，最多10场]\n'
     '团战 一速 玩家名或UID 速度\n'
@@ -176,15 +173,6 @@ def register_gvg(service):
     async def gvg_daily_update():
         await run_update_job(service)
 
-    @service.on_prefix('查速')
-    async def pvp_speed_command(bot, ev):
-        query = ev.message.extract_plain_text().strip()
-        try:
-            message = await asyncio.to_thread(query_pvp_speeds_sync, query)
-        except Exception as exc:
-            message = '查速失败：{}'.format(exc)
-        await bot.send(ev, _format_query_reply(message), at_sender=False)
-
     @service.on_prefix('团战')
     async def gvg_command(bot, ev):
         raw = ev.message.extract_plain_text().strip()
@@ -203,14 +191,6 @@ def register_gvg(service):
             await bot.send(ev, '开始更新团战数据，请稍候。', at_sender=False)
             await run_update_job(
                 service, bot=bot, ev=ev, notify_superuser=False)
-            return
-
-        if raw == '防守':
-            try:
-                message = format_defenses()
-            except Exception as exc:
-                message = '查询失败：{}'.format(exc)
-            await bot.send(ev, _format_query_reply(message), at_sender=False)
             return
 
         if raw == '胜率表':

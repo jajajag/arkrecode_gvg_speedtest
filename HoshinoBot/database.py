@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .api import BASE_DIR, GameRequestError, INFO_IMAGE_LOCK, oid
+from .api import BASE_DIR, GameRequestError, INFO_IMAGE_LOCK
 
 
 DATA_DIR = BASE_DIR / 'data'
@@ -54,7 +54,7 @@ def init_database(path=DATA_DB_PATH):
                 info_date TEXT,
                 updated_at INTEGER NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS gvg_defences (
+            CREATE TABLE IF NOT EXISTS gvg_current_members (
                 cuid INTEGER PRIMARY KEY,
                 snapshot_date TEXT NOT NULL,
                 sort_order INTEGER NOT NULL,
@@ -102,29 +102,9 @@ def init_database(path=DATA_DB_PATH):
                 dead INTEGER NOT NULL,
                 PRIMARY KEY (battle_id, round_idx, side, pos)
             );
-            CREATE TABLE IF NOT EXISTS pvp_meta (
+            CREATE TABLE IF NOT EXISTS plugin_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS pvp_equips (
-                equip_id TEXT PRIMARY KEY,
-                cuid INTEGER,
-                player_name TEXT,
-                equip_type TEXT,
-                static_id TEXT,
-                set_name TEXT,
-                class_lv INTEGER,
-                lv INTEGER,
-                main_prop TEXT,
-                main_value REAL,
-                sub1_prop TEXT,
-                sub1_value REAL,
-                sub2_prop TEXT,
-                sub2_value REAL,
-                sub3_prop TEXT,
-                sub3_value REAL,
-                sub4_prop TEXT,
-                sub4_value REAL
             );
             CREATE INDEX IF NOT EXISTS idx_gvg_rounds_recent
                 ON gvg_rounds(start_ts);
@@ -135,20 +115,51 @@ def init_database(path=DATA_DB_PATH):
             CREATE INDEX IF NOT EXISTS idx_gvg_info_history_player
                 ON gvg_member_info_history(cuid, archived_at DESC, id DESC);
             ''')
+        _migrate_legacy_tables(conn)
         conn.commit()
     finally:
         conn.close()
 
 
+def _table_exists(conn, table):
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone() is not None
+
+
+def _migrate_legacy_tables(conn):
+    if _table_exists(conn, 'pvp_meta'):
+        conn.execute(
+            '''
+            INSERT OR IGNORE INTO plugin_meta(key, value)
+            SELECT key, value FROM pvp_meta
+            ''')
+    if _table_exists(conn, 'gvg_defences'):
+        conn.execute(
+            '''
+            INSERT OR IGNORE INTO gvg_current_members(
+                cuid, snapshot_date, sort_order,
+                upper_1_role_id, upper_2_role_id, upper_3_role_id,
+                lower_1_role_id, lower_2_role_id, lower_3_role_id
+            )
+            SELECT
+                cuid, snapshot_date, sort_order,
+                upper_1_role_id, upper_2_role_id, upper_3_role_id,
+                lower_1_role_id, lower_2_role_id, lower_3_role_id
+            FROM gvg_defences
+            ''')
+
+
 def meta_get(conn, key):
     row = conn.execute(
-        'SELECT value FROM pvp_meta WHERE key = ?', (key,)).fetchone()
+        'SELECT value FROM plugin_meta WHERE key = ?', (key,)).fetchone()
     return row['value'] if row else None
 
 
 def meta_set(conn, key, value):
     conn.execute(
-        'INSERT INTO pvp_meta(key, value) VALUES (?, ?) '
+        'INSERT INTO plugin_meta(key, value) VALUES (?, ?) '
         'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
         (key, str(value)),
     )
@@ -158,80 +169,17 @@ def update_our_guild_meta(guild_info, db_path=DATA_DB_PATH):
     init_database(db_path)
     conn = connect_data(db_path)
     try:
+        meta_set(conn, 'our_guild_id', guild_info.get('id') or '')
         meta_set(conn, 'our_guild_name', guild_info.get('name') or '')
         conn.commit()
     finally:
         conn.close()
 
 
-def save_pvp_equips(data, db_path=DATA_DB_PATH):
-    init_database(db_path)
-    conn = connect_data(db_path)
-    saved = 0
-    try:
-        conn.execute('BEGIN IMMEDIATE')
-        for item in data.get('PVPRankInfoList') or []:
-            player = item.get('PlayerInfo') or {}
-            pvp_info = item.get('PVPInfo') or {}
-            defense = pvp_info.get('DefenceTeam') or {}
-            role_map = defense.get('PositionRoleMap') or {}
-            for role in role_map.values():
-                for equip_type, equip in (role.get('EquipmentMap') or {}).items():
-                    equip_id = oid(equip.get('_id'))
-                    if not equip_id:
-                        continue
-                    new_lv = int(equip.get('LV') or 0)
-                    old = conn.execute(
-                        'SELECT lv FROM pvp_equips WHERE equip_id=?',
-                        (equip_id,),
-                    ).fetchone()
-                    if old and new_lv <= int(old['lv'] or 0):
-                        continue
-                    main_prop = equip.get('MainProp') or {}
-                    source_values = ((equip.get('SubProps') or {}).get(
-                        'SourceValues') or [])
-                    subprops = (list(source_values) + [{}] * 4)[:4]
-                    conn.execute(
-                        '''
-                        INSERT OR REPLACE INTO pvp_equips(
-                            equip_id, cuid, player_name, equip_type,
-                            static_id, set_name, class_lv, lv,
-                            main_prop, main_value,
-                            sub1_prop, sub1_value, sub2_prop, sub2_value,
-                            sub3_prop, sub3_value, sub4_prop, sub4_value
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                  ?, ?, ?, ?)
-                        ''',
-                        (equip_id, player.get('CUID'),
-                         str(player.get('Name') or ''), str(equip_type),
-                         str(equip.get('StaticID') or ''),
-                         str(equip.get('Set') or ''),
-                         int(equip.get('ClassLV') or 0), new_lv,
-                         str(main_prop.get('PropertyType') or ''),
-                         main_prop.get('Value') or 0,
-                         str(subprops[0].get('PropertyType') or ''),
-                         subprops[0].get('Value') or 0,
-                         str(subprops[1].get('PropertyType') or ''),
-                         subprops[1].get('Value') or 0,
-                         str(subprops[2].get('PropertyType') or ''),
-                         subprops[2].get('Value') or 0,
-                         str(subprops[3].get('PropertyType') or ''),
-                         subprops[3].get('Value') or 0),
-                    )
-                    saved += 1
-        conn.commit()
-        return saved
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def replace_defenses(members, enemy_guild, db_path=DATA_DB_PATH,
-                     snapshot_date=None, images_dir=IMAGES_DIR):
+def replace_current_members(members, enemy_guild, db_path=DATA_DB_PATH,
+                            snapshot_date=None, images_dir=IMAGES_DIR):
     with INFO_IMAGE_LOCK:
-        return _replace_defenses_locked(
+        return _replace_current_members_locked(
             members,
             enemy_guild,
             db_path=db_path,
@@ -290,8 +238,10 @@ def _archive_member_info(conn, match_date, enemy_guild_id,
         )
 
 
-def _replace_defenses_locked(members, enemy_guild, db_path=DATA_DB_PATH,
-                             snapshot_date=None, images_dir=IMAGES_DIR):
+def _replace_current_members_locked(members, enemy_guild,
+                                    db_path=DATA_DB_PATH,
+                                    snapshot_date=None,
+                                    images_dir=IMAGES_DIR):
     init_database(db_path)
     snapshot_date = snapshot_date or today()
     conn = connect_data(db_path)
@@ -308,7 +258,7 @@ def _replace_defenses_locked(members, enemy_guild, db_path=DATA_DB_PATH,
             or bool(guild_name and previous_guild_name == guild_name)
         )
         is_new_match = previous_date != snapshot_date or not same_enemy
-        conn.execute('DELETE FROM gvg_defences')
+        conn.execute('DELETE FROM gvg_current_members')
         if is_new_match:
             _archive_member_info(
                 conn,
@@ -320,11 +270,15 @@ def _replace_defenses_locked(members, enemy_guild, db_path=DATA_DB_PATH,
                 'UPDATE gvg_members SET info=NULL, info_date=NULL '
                 'WHERE info IS NOT NULL OR info_date IS NOT NULL')
         for member in members:
-            upper = [role_id for _, role_id in sorted(member['first'])]
-            lower = [role_id for _, role_id in sorted(member['second'])]
-            if len(upper) != 3 or len(lower) != 3:
+            upper = [role_id for _, role_id in sorted(
+                member.get('first') or [])]
+            lower = [role_id for _, role_id in sorted(
+                member.get('second') or [])]
+            if (upper and len(upper) != 3) or (lower and len(lower) != 3):
                 raise GameRequestError(
                     '{} 的防守阵容不是上下半各三人'.format(member['name']))
+            upper = (upper + [None, None, None])[:3]
+            lower = (lower + [None, None, None])[:3]
             conn.execute(
                 '''
                 INSERT INTO gvg_members(
@@ -340,7 +294,7 @@ def _replace_defenses_locked(members, enemy_guild, db_path=DATA_DB_PATH,
             )
             conn.execute(
                 '''
-                INSERT OR REPLACE INTO gvg_defences(
+                INSERT OR REPLACE INTO gvg_current_members(
                     cuid, snapshot_date, sort_order,
                     upper_1_role_id, upper_2_role_id, upper_3_role_id,
                     lower_1_role_id, lower_2_role_id, lower_3_role_id
@@ -361,7 +315,6 @@ def _replace_defenses_locked(members, enemy_guild, db_path=DATA_DB_PATH,
         raise
     finally:
         conn.close()
-
 
 def save_battle_rows(rows, db_path=DATA_DB_PATH, conn=None):
     if not rows:

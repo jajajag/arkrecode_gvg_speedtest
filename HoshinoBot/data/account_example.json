@@ -1,10 +1,5 @@
 {
-  "MainAccount": {
-    "Name": "大号玩家昵称",
-    "Token": "请填写大号 Token"
-  },
-  "SubAccount": {
-    "Name": "小号玩家昵称",
-    "Token": "请填写小号 Token"
-  }
+  "Token": "请填写 Token",
+  "GuildID": "请填写自己团的 GID",
+  "DailyActivityRuns": 10
 }
