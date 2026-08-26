@@ -38,7 +38,12 @@ ALIAS_URL = (
 
 def partial_guild_info(data):
     guild = (data or {}).get('GuildData') or {}
-    info = guild.get('GuildInfo') or guild.get('GuildSubInfo') or guild
+    info = (
+        guild.get('Info')
+        or guild.get('GuildInfo')
+        or guild.get('GuildSubInfo')
+        or guild
+    )
     return {
         'id': oid(info.get('_id') or guild.get('_id')),
         'name': str(info.get('Name') or guild.get('Name') or ''),
