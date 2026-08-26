@@ -2,6 +2,7 @@ import copy
 import re
 import sqlite3
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from .database import MASTER_DB_PATH
 
 LOCAL_TZ = timezone(timedelta(hours=8))
 DEFAULT_ACTIVITY_RUNS = 10
+ACTIVITY_SUPPORT_CUID = 119413335
 QUEST_BATCH_SIZE = 10
 SUPPORT_ITEM_IDS = ('CR14', 'CR24', 'CR34', 'CR44', 'CR54')
 LAB_REWARD_ROUTES = (
@@ -228,7 +230,10 @@ class LoginTeamBuilder:
         pos_map = {}
         for raw_role_id, raw_pos in role_pos_map.items():
             pos_map[str(raw_pos)] = self.role_for_team(oid(raw_role_id))
-        return {'PositionRoleMap': pos_map}
+        camp = {'PositionRoleMap': pos_map}
+        if setting.get('Name'):
+            camp['Name'] = setting.get('Name')
+        return camp
 
     def teams(self):
         result = []
@@ -337,16 +342,112 @@ def activity_scene_ids(pickup, db_path=MASTER_DB_PATH):
 
 def parse_team(raw):
     members = []
-    for match in re.finditer(
+    for item in re.findall(r'\{[^{}]*M:"[^"]+"[^{}]*\}', raw or ''):
+        match = re.search(
             r'M:"(?P<sid>[^"]+)"[^}]*?Pos:(?P<pos>\d+)'
             r'[^}]*?LV:(?P<lv>\d+)',
-            raw or ''):
+            item)
+        if not match:
+            continue
+        artifact = re.search(r'ArtifactID:"(?P<id>[^"]+)"', item)
+        artifact_lv = re.search(r'ArtifactLV:(?P<lv>\d+)', item)
         members.append({
             'sid': match.group('sid'),
             'pos': intv(match.group('pos')),
             'lv': intv(match.group('lv'), 60),
+            'artifact_id': artifact.group('id') if artifact else '',
+            'artifact_lv': intv(
+                artifact_lv.group('lv') if artifact_lv else None, 1),
         })
     return members
+
+
+def role_skill_ids(role_static_id, conn=None):
+    if conn is None:
+        return []
+    prefix = str(role_static_id or '').removeprefix('PVP')
+    try:
+        return [
+            str(row[0]) for row in conn.execute(
+                'SELECT ID FROM Skill WHERE ID LIKE ? ORDER BY ID',
+                ('{}S%'.format(prefix),),
+            )
+        ]
+    except sqlite3.Error:
+        return []
+
+
+def npc_role(static_id, lv=60, artifact_id='', artifact_lv=1,
+             skill_ids=None):
+    role_id = str(uuid.uuid4())
+    role_sid = str(static_id or '')
+    skill_ids = skill_ids or []
+    role = {
+        '_id': role_id,
+        'StaticID': role_sid,
+        'Exp': 0,
+        'LV': intv(lv, 60),
+        'AwakenLV': 0,
+        'AwakenValue': 0,
+        'Star': 6,
+        'ImprintLV': 0,
+        'Locks': [],
+        'IsLock': 0,
+        'IsFavorite': 0,
+        'IsSelfImprintOpen': 0,
+        'IsDispatched': 0,
+        'IsSelfImprint': 0,
+        'Skills': {'Skills': [
+            {'Level': 1, 'StaticID': skill_id}
+            for skill_id in skill_ids
+        ]},
+    }
+    if artifact_id:
+        role['ArtifactData'] = {
+            '_id': '',
+            'StaticID': artifact_id,
+            'Exp': 0,
+            'LV': intv(artifact_lv, 1),
+            'Enhance': 0,
+            'IsLock': 0,
+            'IsNew': 1,
+        }
+    return role
+
+
+def npc_camp(scene_id, db_path=MASTER_DB_PATH):
+    if {'ID', 'WaveInfoJsonString'} - table_columns(db_path, 'Scene'):
+        return None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                'SELECT WaveInfoJsonString FROM Scene WHERE ID=?',
+                (scene_id,),
+            ).fetchone()
+            if not row:
+                return None
+            members = parse_team(row[0])
+            if not members:
+                return None
+            role_map = {
+                str(member['pos']): npc_role(
+                    member['sid'],
+                    member['lv'],
+                    member.get('artifact_id') or '',
+                    member.get('artifact_lv') or 1,
+                    role_skill_ids(member['sid'], conn),
+                )
+                for member in members
+            }
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return {
+        'Name': '方舟α维安小队',
+        'PositionRoleMap': role_map,
+    }
 
 
 def activity_npc_maps(pickup, db_path=MASTER_DB_PATH):
@@ -670,6 +771,33 @@ def npc_next_times(login_data):
     return result
 
 
+def npc_battle_end_data(scene_id, team, enemy_camp):
+    enemy_roles = (enemy_camp or {}).get('PositionRoleMap') or {}
+    return {
+        'StartBattleInfo': {
+            'SceneData': {
+                'StaticID': 'PVP',
+                'Stars': [0, 0, 0],
+                'PassCount': 0,
+            },
+            'CampData1': team,
+            'CampData2': enemy_camp,
+            'IsRestart': 0,
+            'Round': 0,
+            'GM_Wave': 0,
+            'IsRepeatAuto': 0,
+            'BattleCountDown': -1,
+            'IsNPCPVP': 1,
+        },
+        'Camp2DeadList': [
+            oid(role.get('_id')) for _, role in sorted(enemy_roles.items())
+        ],
+        'Result': 'Win',
+        'TurnRole': 0,
+        'FinishWave': 0,
+    }
+
+
 def run_npc_and_dispatch(client, login_data, team, report):
     if not team:
         report.skip('NPC')
@@ -678,24 +806,30 @@ def run_npc_and_dispatch(client, login_data, team, report):
             if next_time > now_ms():
                 report.skip('NPC')
                 continue
-            safe_call(
+            scene_id = 'HellNPC_{}'.format(npc_id)
+            ticket = safe_call(
                 client,
                 report,
                 'NPC',
                 'PVPHandler.PVPCheckTicket',
-                {'NPCSceneID': 'HellNPC_{}'.format(npc_id)},
+                {'NPCSceneID': scene_id, 'IsRevenge': 0},
             )
+            log_id = (ticket or {}).get('LogID')
+            enemy_camp = npc_camp(scene_id)
+            if not log_id or not enemy_camp:
+                report.skip('NPC')
+                continue
             safe_call(
                 client,
                 report,
                 'NPC',
                 'PVPHandler.NPCPVPBattleEnd',
                 {
-                    'NPCSceneID': 'HellNPC_{}'.format(npc_id),
-                    'EndData': {
-                        'StartBattleInfo': {'CampData1': team},
-                        'Result': 'Win',
-                    },
+                    'NPCSceneID': scene_id,
+                    'IsRevenge': 0,
+                    'EnemyLogID': log_id,
+                    'EndData': npc_battle_end_data(
+                        scene_id, team, enemy_camp),
                 },
             )
 
@@ -738,7 +872,49 @@ def run_npc_and_dispatch(client, login_data, team, report):
     )
 
 
-def finish_scene(client, report, section, scene_id, team):
+def find_support_by_cuid(source, cuid):
+    target = intv(cuid)
+    for item in walk(source):
+        player_cuid = intv(get_nested(
+            item, 'PlayerRoleData', 'PlayerInfo', 'CUID'))
+        if player_cuid == target and 'PlayerRoleData' in item:
+            return copy.deepcopy(item)
+    return None
+
+
+def support_placeholder(cuid):
+    return {
+        'PlayerRoleData': {
+            'PlayerInfo': {'CUID': intv(cuid)},
+        },
+        'IsFriend': True,
+        'Job': 8,
+        'IsNPC': False,
+    }
+
+
+def activity_support(client, report):
+    data = safe_call(
+        client,
+        report,
+        '活动借人',
+        'SupportFriendHandler.QueryBattleSupportDataList',
+    )
+    return find_support_by_cuid(data, ACTIVITY_SUPPORT_CUID) \
+        or support_placeholder(ACTIVITY_SUPPORT_CUID)
+
+
+def finish_scene(client, report, section, scene_id, team, support=None):
+    start_info = {
+        'SceneData': {
+            'StaticID': scene_id,
+            'Stars': [0, 0, 0],
+            'PassCount': 0,
+        },
+        'CampData1': team,
+    }
+    if support:
+        start_info['Support'] = support
     return safe_call(
         client,
         report,
@@ -746,14 +922,7 @@ def finish_scene(client, report, section, scene_id, team):
         'SceneHandler.FinishScene',
         {
             'BattleEndData': {
-                'StartBattleInfo': {
-                    'SceneData': {
-                        'StaticID': scene_id,
-                        'Stars': [0, 0, 0],
-                        'PassCount': 0,
-                    },
-                    'CampData1': team,
-                },
+                'StartBattleInfo': start_info,
                 'Result': 'Win',
             },
             'IsQuickBattle': 0,
@@ -761,14 +930,45 @@ def finish_scene(client, report, section, scene_id, team):
     )
 
 
-def finish_activity_opening(client, event, default_team, report):
+def finish_activity_opening(client, event, default_team, report, support=None):
     scene_ids = event['scene_ids'][:12]
     for index, scene_id in enumerate(scene_ids):
         team = default_team
         if index in event['npc_maps']:
             team = {'PositionRoleMap': event['npc_maps'][index]}
-        finish_scene(client, report, '活动开图', scene_id, team)
+        finish_scene(client, report, '活动开图', scene_id, team, support)
     return scene_ids[-1] if scene_ids else None
+
+
+def urgent_scene_ids(source):
+    scene_ids = []
+    for container in (
+            get_nested(source, 'UrgentMissionContainer'),
+            get_nested(source, 'AccountSaveData', 'UrgentMissionContainer'),
+    ):
+        for mission in get_nested(container or {}, 'Missions') or []:
+            scene_id = str(mission.get('SceneID') or '').strip()
+            if scene_id and scene_id not in scene_ids:
+                scene_ids.append(scene_id)
+    return scene_ids
+
+
+def run_urgent_missions(client, source, team, report, support=None, limit=20):
+    if not team:
+        report.skip('紧急任务')
+        return
+    pending = urgent_scene_ids(source)
+    finished = set()
+    while pending and len(finished) < limit:
+        scene_id = pending.pop(0)
+        if scene_id in finished:
+            continue
+        finished.add(scene_id)
+        data = finish_scene(client, report, '紧急任务', scene_id, team,
+                            support)
+        for new_scene_id in urgent_scene_ids(data):
+            if new_scene_id not in finished and new_scene_id not in pending:
+                pending.append(new_scene_id)
 
 
 def run_activity(client, login_data, event, team, repeat, report):
@@ -781,18 +981,18 @@ def run_activity(client, login_data, event, team, repeat, report):
     pickup = event['pickup']
     _, scene_id = highest_passed_scene(
         login_data, r'B{}_1_(\d+)'.format(re.escape(pickup)))
+    support = activity_support(client, report)
     if not scene_id:
-        scene_id = finish_activity_opening(client, event, team, report)
+        scene_id = finish_activity_opening(
+            client, event, team, report, support)
     if not scene_id:
         report.skip('活动讨伐')
         return
+    run_urgent_missions(client, login_data, team, report, support)
     for _ in range(max(intv(repeat, DEFAULT_ACTIVITY_RUNS), 0)):
-        data = finish_scene(client, report, '活动讨伐', scene_id, team)
-        for mission in get_nested(data or {}, 'UrgentMissionContainer',
-                                  'Missions') or []:
-            urgent_sid = mission.get('SceneID')
-            if urgent_sid:
-                finish_scene(client, report, '紧急任务', urgent_sid, team)
+        data = finish_scene(
+            client, report, '活动讨伐', scene_id, team, support)
+        run_urgent_missions(client, data, team, report, support)
 
 
 def secret_records(login_data):

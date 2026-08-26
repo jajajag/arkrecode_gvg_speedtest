@@ -333,11 +333,14 @@ _SHARED_CLIENTS = {}
 _SHARED_CLIENT_LOCK = threading.Lock()
 
 
-def get_game_client():
+def get_game_client(reload_config=False):
     """Return the process-wide client for the configured game account."""
     with _SHARED_CLIENT_LOCK:
         key = 'default'
-        if key not in _SHARED_CLIENTS:
+        if reload_config or key not in _SHARED_CLIENTS:
+            old_client = _SHARED_CLIENTS.get(key)
+            if old_client is not None:
+                old_client.http.close()
             _SHARED_CLIENTS[key] = GameClient(load_config())
         return _SHARED_CLIENTS[key]
 

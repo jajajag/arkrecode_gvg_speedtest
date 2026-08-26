@@ -258,9 +258,9 @@ def update_master(bulletin, http):
     return catalog, changed
 
 
-def update_all_sync():
+def update_all_sync(run_daily=False):
     init_database()
-    client = get_game_client()
+    client = get_game_client(reload_config=True)
     client.login(attempts=3, force=True)
     our_guild_id = str(client.config.get('GuildID') or '').strip()
     if not our_guild_id:
@@ -328,11 +328,12 @@ def update_all_sync():
     if battle_result['parse_failures']:
         warnings.append('有 {} 场战斗详情解析失败，已跳过'.format(
             battle_result['parse_failures']))
-    try:
-        daily_result = run_daily_cleanup(client, client.login_data)
-        warnings.extend(daily_result['warnings'])
-    except Exception as exc:
-        warnings.append('日常清理失败：{}'.format(exc))
+    if run_daily:
+        try:
+            daily_result = run_daily_cleanup(client, client.login_data)
+            warnings.extend(daily_result['warnings'])
+        except Exception as exc:
+            warnings.append('日常清理失败：{}'.format(exc))
     return result
 
 

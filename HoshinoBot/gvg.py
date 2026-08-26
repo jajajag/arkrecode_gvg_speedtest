@@ -36,9 +36,10 @@ async def report_to_superuser(message):
     )
 
 
-async def run_update_job(service, bot=None, ev=None, notify_superuser=True):
+async def run_update_job(service, bot=None, ev=None, notify_superuser=True,
+                         run_daily=False):
     try:
-        result = await asyncio.to_thread(update_all_sync)
+        result = await asyncio.to_thread(update_all_sync, run_daily=run_daily)
         message = update_result_text(result)
         if notify_superuser:
             await report_to_superuser(message)
@@ -171,7 +172,7 @@ def register_gvg(service):
 
     @service.scheduled_job('cron', hour=8, minute=5)
     async def gvg_daily_update():
-        await run_update_job(service)
+        await run_update_job(service, run_daily=True)
 
     @service.on_prefix('团战')
     async def gvg_command(bot, ev):
