@@ -136,6 +136,15 @@ def _migrate_legacy_tables(conn):
             SELECT key, value FROM pvp_meta
             ''')
     if _table_exists(conn, 'gvg_defences'):
+        migration_key = 'legacy_gvg_defences_migrated'
+        if meta_get(conn, migration_key):
+            return
+        has_current_members = conn.execute(
+            'SELECT 1 FROM gvg_current_members LIMIT 1'
+        ).fetchone() is not None
+        if has_current_members:
+            meta_set(conn, migration_key, 'skipped')
+            return
         conn.execute(
             '''
             INSERT OR IGNORE INTO gvg_current_members(
@@ -149,6 +158,7 @@ def _migrate_legacy_tables(conn):
                 lower_1_role_id, lower_2_role_id, lower_3_role_id
             FROM gvg_defences
             ''')
+        meta_set(conn, migration_key, 'done')
 
 
 def meta_get(conn, key):
