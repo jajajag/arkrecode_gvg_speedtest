@@ -12,7 +12,6 @@ from .database import MASTER_DB_PATH
 
 LOCAL_TZ = timezone(timedelta(hours=8))
 DEFAULT_ACTIVITY_RUNS = 10
-ACTIVITY_SUPPORT_CUID = 119413335
 QUEST_BATCH_SIZE = 10
 SUPPORT_ITEM_IDS = ('CR14', 'CR24', 'CR34', 'CR44', 'CR54')
 LAB_REWARD_ROUTES = (
@@ -97,16 +96,20 @@ def intv(value, default=0):
 class DailyReport:
     def __init__(self):
         self.warnings = []
+        self.ok_counts = {}
 
     def ok(self, section):
+        self.ok_counts[section] = self.ok_counts.get(section, 0) + 1
+
+    def skip(self, section, reason=None):
         pass
 
-    def skip(self, section):
-        pass
+    def warn(self, message):
+        if len(self.warnings) < 8:
+            self.warnings.append(message)
 
     def fail(self, section, exc):
-        if len(self.warnings) < 8:
-            self.warnings.append('{}：{}'.format(section, exc))
+        self.warn('{}：{}'.format(section, exc))
 
 
 def safe_call(client, report, section, route, data=None,
@@ -605,6 +608,7 @@ def run_basic_daily(client, login_data, event, report):
         '佣兵团签到',
         'GuildHandler.GuildMemberCheckIn',
         skip_if=same_local_day(date_ms(guild.get('LastCheckInTime'))),
+        report_failure=True,
     )
     safe_call(
         client,
@@ -613,6 +617,7 @@ def run_basic_daily(client, login_data, event, report):
         'GuildHandler.DonateCourage',
         {'ItemID': '28', 'Count': 3},
         skip_if=intv(guild.get('DayDonateCourageCount')) >= 3,
+        report_failure=True,
     )
     safe_call(
         client,
@@ -621,6 +626,7 @@ def run_basic_daily(client, login_data, event, report):
         'GuildHandler.DonateGold',
         {'ItemID': '1', 'Count': 10},
         skip_if=intv(guild.get('DayDonateGoldCount')) >= 10,
+        report_failure=True,
     )
     safe_call(
         client,
@@ -628,6 +634,7 @@ def run_basic_daily(client, login_data, event, report):
         '佣兵团签到',
         'GuildHandler.GuildMemberDayCheckReward',
         skip_if=not guild.get('CanLastDayCheckReward'),
+        report_failure=True,
     )
     safe_call(
         client,
@@ -894,17 +901,22 @@ def support_placeholder(cuid):
 
 
 def activity_support(client, report):
+    support_cuid = intv(client.config.get('ActivitySupportCUID'))
+    if not support_cuid:
+        report.skip('活动借人')
+        return None
     data = safe_call(
         client,
         report,
         '活动借人',
         'SupportFriendHandler.QueryBattleSupportDataList',
     )
-    return find_support_by_cuid(data, ACTIVITY_SUPPORT_CUID) \
-        or support_placeholder(ACTIVITY_SUPPORT_CUID)
+    return find_support_by_cuid(data, support_cuid) \
+        or support_placeholder(support_cuid)
 
 
-def finish_scene(client, report, section, scene_id, team, support=None):
+def finish_scene(client, report, section, scene_id, team, support=None,
+                 report_failure=False):
     start_info = {
         'SceneData': {
             'StaticID': scene_id,
@@ -927,17 +939,32 @@ def finish_scene(client, report, section, scene_id, team, support=None):
             },
             'IsQuickBattle': 0,
         },
+        report_failure=report_failure,
     )
 
 
 def finish_activity_opening(client, event, default_team, report, support=None):
     scene_ids = event['scene_ids'][:12]
+    last_scene_id = None
     for index, scene_id in enumerate(scene_ids):
         team = default_team
         if index in event['npc_maps']:
             team = {'PositionRoleMap': event['npc_maps'][index]}
-        finish_scene(client, report, '活动开图', scene_id, team, support)
-    return scene_ids[-1] if scene_ids else None
+        data = finish_scene(
+            client,
+            report,
+            '活动开图',
+            scene_id,
+            team,
+            support,
+            report_failure=index == 0,
+        )
+        if data is None:
+            if index == 0:
+                report.warn('活动开图首战失败，活动讨伐未继续')
+            return last_scene_id
+        last_scene_id = scene_id
+    return last_scene_id
 
 
 def urgent_scene_ids(source):
@@ -973,10 +1000,10 @@ def run_urgent_missions(client, source, team, report, support=None, limit=20):
 
 def run_activity(client, login_data, event, team, repeat, report):
     if not event:
-        report.skip('活动讨伐')
+        report.warn('活动讨伐未执行：未识别当前活动')
         return
     if not team:
-        report.skip('活动讨伐')
+        report.warn('活动讨伐未执行：登录数据里没有可用队伍')
         return
     pickup = event['pickup']
     _, scene_id = highest_passed_scene(
@@ -986,12 +1013,27 @@ def run_activity(client, login_data, event, team, repeat, report):
         scene_id = finish_activity_opening(
             client, event, team, report, support)
     if not scene_id:
-        report.skip('活动讨伐')
+        report.warn('活动讨伐未执行：没有可用活动关卡')
         return
     run_urgent_missions(client, login_data, team, report, support)
-    for _ in range(max(intv(repeat, DEFAULT_ACTIVITY_RUNS), 0)):
+    attempts = max(intv(repeat, DEFAULT_ACTIVITY_RUNS), 0)
+    if attempts <= 0:
+        report.warn('活动讨伐未执行：DailyActivityRuns 为 0')
+        return
+    for index in range(attempts):
         data = finish_scene(
-            client, report, '活动讨伐', scene_id, team, support)
+            client,
+            report,
+            '活动讨伐',
+            scene_id,
+            team,
+            support,
+            report_failure=index == 0,
+        )
+        if data is None:
+            if index == 0:
+                report.warn('活动讨伐首战失败，后续次数未继续')
+            return
         run_urgent_missions(client, data, team, report, support)
 
 
@@ -1036,6 +1078,7 @@ def buy_secret_records(client, records, report):
 
 def run_secret_shop(client, login_data, report):
     records = secret_records(login_data)
+    refreshes = 0
     while True:
         buy_secret_records(client, records, report)
         data = safe_call(
@@ -1044,9 +1087,13 @@ def run_secret_shop(client, login_data, report):
             '神秘商店刷新',
             'StoreHandler.ResetRandomStore',
             {'StoreID': 'SecretShop', 'IsUseGold': 1},
+            report_failure=refreshes == 0,
         )
         if not isinstance(data, dict):
+            if refreshes == 0:
+                report.warn('神秘商店一次都没刷新成功')
             return
+        refreshes += 1
         records = data.get('Records') or []
 
 
@@ -1059,11 +1106,12 @@ def run_daily_cleanup(client, login_data):
     repeat = client.config.get('DailyActivityRuns', DEFAULT_ACTIVITY_RUNS)
 
     run_basic_daily(client, login_data, event, report)
-    claim_battle_pass(client, login_data, report)
-    claim_quest_rewards(client, login_data, event, report)
     run_npc_and_dispatch(client, login_data, team, report)
     run_activity(client, login_data, event, team, repeat, report)
     run_secret_shop(client, login_data, report)
+    claim_battle_pass(client, login_data, report)
+    claim_quest_rewards(client, login_data, event, report)
     return {
+        'summary': '日常正常' if not report.warnings else None,
         'warnings': report.warnings,
     }

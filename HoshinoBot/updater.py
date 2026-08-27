@@ -297,6 +297,7 @@ def update_all_sync(run_daily=False):
         'ranked_guilds': None,
         'aliases': alias_count,
         'master_changed': master_changed,
+        'daily': None,
         'warnings': warnings,
     }
 
@@ -331,6 +332,7 @@ def update_all_sync(run_daily=False):
     if run_daily:
         try:
             daily_result = run_daily_cleanup(client, client.login_data)
+            result['daily'] = daily_result.get('summary')
             warnings.extend(daily_result['warnings'])
         except Exception as exc:
             warnings.append('日常清理失败：{}'.format(exc))
@@ -353,6 +355,8 @@ def update_result_text(result):
     parts.append('别名 {} 条'.format(result['aliases']))
     parts.append('master.db {}'.format(
         '已更新' if result['master_changed'] else '无需更新'))
+    if result.get('daily'):
+        parts.append(result['daily'])
     text = '团战数据更新完成：' + '，'.join(parts)
     if result['warnings']:
         text += '\n' + '\n'.join(result['warnings'])

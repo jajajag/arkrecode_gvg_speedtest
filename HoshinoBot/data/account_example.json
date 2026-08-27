@@ -1,5 +1,6 @@
 {
   "Token": "请填写 Token",
   "GuildID": "请填写自己团的 GID",
-  "DailyActivityRuns": 10
+  "DailyActivityRuns": 10,
+  "ActivitySupportCUID": 119413335
 }
