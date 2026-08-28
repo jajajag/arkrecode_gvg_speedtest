@@ -11,7 +11,6 @@ from .database import MASTER_DB_PATH
 
 
 LOCAL_TZ = timezone(timedelta(hours=8))
-DEFAULT_ACTIVITY_RUNS = 10
 HUNT_STATUS_ID = 'HuntActivity'
 HUNT_ELEMENTS = ('Fire', 'Ice', 'Earth', 'Light', 'Dark')
 HUNT_NAMES = dict(zip(HUNT_ELEMENTS, ('火', '水', '木', '光', '暗')))
@@ -1058,7 +1057,7 @@ def run_urgent_missions(client, source, team, report, support=None, limit=20):
                 pending.append(new_scene_id)
 
 
-def run_activity(client, login_data, event, team, repeat, report):
+def run_activity(client, login_data, event, team, report):
     if not event:
         report.warn('活动讨伐未执行：未识别当前活动')
         return
@@ -1076,11 +1075,8 @@ def run_activity(client, login_data, event, team, repeat, report):
         report.warn('活动讨伐未执行：没有可用活动关卡')
         return
     run_urgent_missions(client, login_data, team, report, support)
-    attempts = max(intv(repeat, DEFAULT_ACTIVITY_RUNS), 0)
-    if attempts <= 0:
-        report.warn('活动讨伐未执行：DailyActivityRuns 为 0')
-        return
-    for index in range(attempts):
+    index = 0
+    while True:
         data = finish_scene(
             client,
             report,
@@ -1092,9 +1088,10 @@ def run_activity(client, login_data, event, team, repeat, report):
         )
         if data is None:
             if index == 0:
-                report.warn('活动讨伐首战失败，后续次数未继续')
+                report.warn('活动讨伐首战失败，讨伐未继续')
             return
         run_urgent_missions(client, data, team, report, support)
+        index += 1
 
 
 def run_hunts(client, login_data, team, report):
@@ -1107,7 +1104,9 @@ def run_hunts(client, login_data, team, report):
         report.warn('讨伐未执行：DailyHuntRuns 全部为 0')
         return
     run_urgent_missions(client, login_data, team, report)
-    for index, element in enumerate(elements):
+    index = 0
+    while True:
+        element = elements[index % len(elements)]
         _, scene_id = highest_passed_scene(
             login_data, r'Hunt{}_(\d+)'.format(element))
         scene_id = scene_id or 'Hunt{}_11'.format(element)
@@ -1120,10 +1119,12 @@ def run_hunts(client, login_data, team, report):
             report_failure=index == 0,
         )
         if data is None:
-            report.warn('{}讨伐失败，后续讨伐未继续'.format(
-                HUNT_NAMES[element]))
+            if index == 0:
+                report.warn('{}讨伐首战失败，讨伐未继续'.format(
+                    HUNT_NAMES[element]))
             return
         run_urgent_missions(client, data, team, report)
+        index += 1
 
 
 def secret_records(login_data):
@@ -1198,8 +1199,7 @@ def run_daily_cleanup(client, login_data):
     if has_active_status(login_data, HUNT_STATUS_ID):
         run_hunts(client, login_data, team, report)
     else:
-        repeat = client.config.get('DailyActivityRuns', DEFAULT_ACTIVITY_RUNS)
-        run_activity(client, login_data, event, team, repeat, report)
+        run_activity(client, login_data, event, team, report)
     run_secret_shop(client, login_data, report)
     claim_battle_pass(client, login_data, report)
     claim_quest_rewards(client, login_data, event, report)
