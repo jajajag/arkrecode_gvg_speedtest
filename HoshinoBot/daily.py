@@ -16,6 +16,7 @@ HUNT_STATUS_ID = 'HuntActivity'
 HUNT_ELEMENTS = ('Fire', 'Ice', 'Earth', 'Light', 'Dark')
 HUNT_NAMES = dict(zip(HUNT_ELEMENTS, ('火', '水', '木', '光', '暗')))
 DEFAULT_HUNT_RUNS = {element: 1 for element in HUNT_ELEMENTS}
+DAILY_FREE_SUMMON_ID = 'NormalSummon'
 QUEST_BATCH_SIZE = 10
 SUPPORT_ITEM_IDS = ('CR14', 'CR24', 'CR34', 'CR44', 'CR54')
 LAB_REWARD_ROUTES = (
@@ -609,6 +610,33 @@ def store_bought_today(records, static_id):
     return same_local_day(date_ms(record.get('LastBuyTime')))
 
 
+def claim_daily_free_summon(client, records, report):
+    record = records.get(DAILY_FREE_SUMMON_ID)
+    if not record:
+        report.skip('每日免费召唤')
+        return
+    buy_count = intv(record.get('BuyCount'))
+    free_count = intv(record.get('FreeBuyCount'))
+    result = safe_call(
+        client,
+        report,
+        '每日免费召唤',
+        'StoreHandler.BuyCommodity',
+        {
+            'Record': {
+                '_id': oid(record.get('_id')),
+                'StaticID': DAILY_FREE_SUMMON_ID,
+            },
+            'Count': 1,
+            'SelcetCostItemID': '',
+        },
+        skip_if=buy_count >= free_count,
+        report_failure=True,
+    )
+    if result is not None:
+        record['BuyCount'] = buy_count + 1
+
+
 def run_basic_daily(client, login_data, event, report):
     run_guild_support(client, login_data, report)
     reactor = login_data.get('ArkReactorData') or {}
@@ -691,6 +719,7 @@ def run_basic_daily(client, login_data, event, report):
             skip_if=same_local_day(date_ms(week_row.get('LastSignInTime'))),
         )
     safe_call(client, report, '月卡礼包', 'ServerStatusHandler.Query')
+    claim_daily_free_summon(client, records, report)
     for record, count in DAILY_STORE_PURCHASES:
         static_id = record['StaticID']
         safe_call(
