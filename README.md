@@ -80,7 +80,8 @@ pip install requests UnityPy
 团战 信息 玩家名或UID 内容或图片
 团战 历史 玩家名或UID
 团战 玩家名或UID
-团战 更新数据（仅限Bot主））
+团战 清日常（仅限Bot主）
+团战 更新数据（仅限Bot主）
 ```
 
 团战测速示例：

@@ -16,7 +16,12 @@ from .queries import (
     set_max_speed,
     set_member_info,
 )
-from .updater import update_all_sync, update_result_text
+from .updater import (
+    daily_result_text,
+    run_daily_sync,
+    update_all_sync,
+    update_result_text,
+)
 
 
 async def report_to_superuser(message):
@@ -65,6 +70,7 @@ GVG_HELP = (
     '团战 信息 玩家名或UID 内容或图片\n'
     '团战 历史 玩家名或UID\n'
     '团战 玩家名或UID\n'
+    '团战 清日常（仅限Bot主）\n'
     '团战 更新数据（仅限Bot主）'
 )
 
@@ -192,6 +198,22 @@ def register_gvg(service):
             await bot.send(ev, '开始更新团战数据，请稍候。', at_sender=False)
             await run_update_job(
                 service, bot=bot, ev=ev, notify_superuser=False)
+            return
+
+        if raw == '清日常':
+            from hoshino.config import SUPERUSERS
+            if str(ev.user_id) not in {str(user) for user in SUPERUSERS}:
+                await bot.send(ev, '只有机器人主人可以清理日常。',
+                               at_sender=False)
+                return
+            await bot.send(ev, '开始清理日常，请稍候。', at_sender=False)
+            try:
+                result = await asyncio.to_thread(run_daily_sync)
+                message = daily_result_text(result)
+            except Exception as exc:
+                service.logger.exception(exc)
+                message = '日常清理失败：{}'.format(exc)
+            await bot.send(ev, message, at_sender=False)
             return
 
         if raw == '胜率表':

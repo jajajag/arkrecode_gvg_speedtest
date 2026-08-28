@@ -12,6 +12,10 @@ from .database import MASTER_DB_PATH
 
 LOCAL_TZ = timezone(timedelta(hours=8))
 DEFAULT_ACTIVITY_RUNS = 10
+HUNT_STATUS_ID = 'HuntActivity'
+HUNT_ELEMENTS = ('Fire', 'Ice', 'Earth', 'Light', 'Dark')
+HUNT_NAMES = dict(zip(HUNT_ELEMENTS, ('火', '水', '木', '光', '暗')))
+DEFAULT_HUNT_RUNS = {element: 1 for element in HUNT_ELEMENTS}
 QUEST_BATCH_SIZE = 10
 SUPPORT_ITEM_IDS = ('CR14', 'CR24', 'CR34', 'CR44', 'CR54')
 LAB_REWARD_ROUTES = (
@@ -271,6 +275,40 @@ def highest_passed_scene(login_data, pattern):
         if index > best[0]:
             best = (index, static_id)
     return best
+
+
+def has_active_status(login_data, static_id):
+    login_time = date_ms(
+        get_nested(login_data, 'Info', 'LoginTime')) or now_ms()
+    statuses = get_nested(login_data, 'StatusContainer', 'List') or []
+    for status in statuses:
+        if status.get('StaticID') != static_id:
+            continue
+        start = date_ms(status.get('TriggerTime'))
+        end = date_ms(status.get('EndTime'))
+        if (not start or start <= login_time) and (not end or login_time < end):
+            return True
+    return False
+
+
+def hunt_run_counts(config):
+    configured = config.get('DailyHuntRuns')
+    if not isinstance(configured, dict):
+        return dict(DEFAULT_HUNT_RUNS)
+    return {
+        element: max(intv(configured.get(element), 1), 0)
+        for element in HUNT_ELEMENTS
+    }
+
+
+def hunt_rotation(counts):
+    rounds = max(counts.values(), default=0)
+    return [
+        element
+        for index in range(rounds)
+        for element in HUNT_ELEMENTS
+        if counts[element] > index
+    ]
 
 
 def pickup_from_login(login_data):
@@ -893,10 +931,8 @@ def support_placeholder(cuid):
     return {
         'PlayerRoleData': {
             'PlayerInfo': {'CUID': intv(cuid)},
+            'RoleData': {'StaticID': 'H001'},
         },
-        'IsFriend': True,
-        'Job': 8,
-        'IsNPC': False,
     }
 
 
@@ -918,11 +954,7 @@ def activity_support(client, report):
 def finish_scene(client, report, section, scene_id, team, support=None,
                  report_failure=False):
     start_info = {
-        'SceneData': {
-            'StaticID': scene_id,
-            'Stars': [0, 0, 0],
-            'PassCount': 0,
-        },
+        'SceneData': {'StaticID': scene_id},
         'CampData1': team,
     }
     if support:
@@ -937,7 +969,6 @@ def finish_scene(client, report, section, scene_id, team, support=None,
                 'StartBattleInfo': start_info,
                 'Result': 'Win',
             },
-            'IsQuickBattle': 0,
         },
         report_failure=report_failure,
     )
@@ -1037,6 +1068,35 @@ def run_activity(client, login_data, event, team, repeat, report):
         run_urgent_missions(client, data, team, report, support)
 
 
+def run_hunts(client, login_data, team, report):
+    if not team:
+        report.warn('讨伐未执行：登录数据里没有可用队伍')
+        return
+    counts = hunt_run_counts(client.config)
+    elements = hunt_rotation(counts)
+    if not elements:
+        report.warn('讨伐未执行：DailyHuntRuns 全部为 0')
+        return
+    run_urgent_missions(client, login_data, team, report)
+    for index, element in enumerate(elements):
+        _, scene_id = highest_passed_scene(
+            login_data, r'Hunt{}_(\d+)'.format(element))
+        scene_id = scene_id or 'Hunt{}_11'.format(element)
+        data = finish_scene(
+            client,
+            report,
+            '{}讨伐'.format(HUNT_NAMES[element]),
+            scene_id,
+            team,
+            report_failure=index == 0,
+        )
+        if data is None:
+            report.warn('{}讨伐失败，后续讨伐未继续'.format(
+                HUNT_NAMES[element]))
+            return
+        run_urgent_missions(client, data, team, report)
+
+
 def secret_records(login_data):
     return [
         record for record in get_nested(
@@ -1103,11 +1163,14 @@ def run_daily_cleanup(client, login_data):
     report = DailyReport()
     event = current_event(login_data)
     team = first_team(login_data)
-    repeat = client.config.get('DailyActivityRuns', DEFAULT_ACTIVITY_RUNS)
 
     run_basic_daily(client, login_data, event, report)
     run_npc_and_dispatch(client, login_data, team, report)
-    run_activity(client, login_data, event, team, repeat, report)
+    if has_active_status(login_data, HUNT_STATUS_ID):
+        run_hunts(client, login_data, team, report)
+    else:
+        repeat = client.config.get('DailyActivityRuns', DEFAULT_ACTIVITY_RUNS)
+        run_activity(client, login_data, event, team, repeat, report)
     run_secret_shop(client, login_data, report)
     claim_battle_pass(client, login_data, report)
     claim_quest_rewards(client, login_data, event, report)

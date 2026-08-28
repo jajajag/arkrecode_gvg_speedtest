@@ -339,6 +339,22 @@ def update_all_sync(run_daily=False):
     return result
 
 
+def run_daily_sync():
+    client = get_game_client(reload_config=True)
+    login_data = client.login(attempts=3, force=True)
+    return run_daily_cleanup(client, login_data)
+
+
+def daily_result_text(result):
+    text = '日常清理完成'
+    if result.get('summary'):
+        text += '：{}'.format(result['summary'])
+    warnings = result.get('warnings') or []
+    if warnings:
+        text += '\n' + '\n'.join(warnings)
+    return text
+
+
 def update_result_text(result):
     parts = []
     if result['enemy_guild']:

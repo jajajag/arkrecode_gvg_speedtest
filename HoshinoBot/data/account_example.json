@@ -2,5 +2,12 @@
   "Token": "请填写 Token",
   "GuildID": "请填写自己团的 GID",
   "DailyActivityRuns": 10,
+  "DailyHuntRuns": {
+    "Fire": 1,
+    "Ice": 1,
+    "Earth": 1,
+    "Light": 1,
+    "Dark": 1
+  },
   "ActivitySupportCUID": 119413335
 }
