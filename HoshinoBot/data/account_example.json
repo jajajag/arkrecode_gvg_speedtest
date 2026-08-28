@@ -1,6 +1,7 @@
 {
   "Token": "请填写 Token",
   "GuildID": "请填写自己团的 GID",
+  "RandomStoreDayRefreshLimit": 30,
   "DailyHuntRuns": {
     "Fire": 1,
     "Ice": 1,

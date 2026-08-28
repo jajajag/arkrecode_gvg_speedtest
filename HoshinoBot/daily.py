@@ -48,6 +48,7 @@ SECRET_SHOP_ITEMS = {
     'EC11', 'EC21', 'EC31', 'EC41', 'EC51', 'EC61',
     '5', '6',
 }
+DEFAULT_SECRET_SHOP_REFRESH_LIMIT = 30
 
 
 def walk(value):
@@ -551,7 +552,14 @@ def support_items(login_data):
     return counts
 
 
+def has_guild(login_data):
+    return bool(oid(get_nested(login_data, 'PlayerGuildInfo', 'GID')).strip())
+
+
 def run_guild_support(client, login_data, report):
+    if not has_guild(login_data):
+        report.skip('佣兵团支援')
+        return
     sups = support_items(login_data)
     if not sups.get('CUID'):
         report.skip('佣兵团支援')
@@ -637,7 +645,11 @@ def claim_daily_free_summon(client, records, report):
 
 
 def run_basic_daily(client, login_data, event, report):
-    run_guild_support(client, login_data, report)
+    in_guild = has_guild(login_data)
+    if in_guild:
+        run_guild_support(client, login_data, report)
+    else:
+        report.skip('佣兵团支援')
     reactor = login_data.get('ArkReactorData') or {}
     lab = login_data.get('ArkStarForceLabData') or {}
     guild = login_data.get('PlayerGuildInfo') or {}
@@ -667,40 +679,44 @@ def run_basic_daily(client, login_data, event, report):
             route,
             skip_if=date_ms(lab.get(key)) > now_ms(),
         )
-    safe_call(
-        client,
-        report,
-        '佣兵团签到',
-        'GuildHandler.GuildMemberCheckIn',
-        skip_if=same_local_day(date_ms(guild.get('LastCheckInTime'))),
-        report_failure=True,
-    )
-    safe_call(
-        client,
-        report,
-        '佣兵团捐献',
-        'GuildHandler.DonateCourage',
-        {'ItemID': '28', 'Count': 3},
-        skip_if=intv(guild.get('DayDonateCourageCount')) >= 3,
-        report_failure=True,
-    )
-    safe_call(
-        client,
-        report,
-        '佣兵团捐献',
-        'GuildHandler.DonateGold',
-        {'ItemID': '1', 'Count': 10},
-        skip_if=intv(guild.get('DayDonateGoldCount')) >= 10,
-        report_failure=True,
-    )
-    safe_call(
-        client,
-        report,
-        '佣兵团签到',
-        'GuildHandler.GuildMemberDayCheckReward',
-        skip_if=not guild.get('CanLastDayCheckReward'),
-        report_failure=True,
-    )
+    if in_guild:
+        safe_call(
+            client,
+            report,
+            '佣兵团签到',
+            'GuildHandler.GuildMemberCheckIn',
+            skip_if=same_local_day(date_ms(guild.get('LastCheckInTime'))),
+            report_failure=True,
+        )
+        safe_call(
+            client,
+            report,
+            '佣兵团捐献',
+            'GuildHandler.DonateCourage',
+            {'ItemID': '28', 'Count': 3},
+            skip_if=intv(guild.get('DayDonateCourageCount')) >= 3,
+            report_failure=True,
+        )
+        safe_call(
+            client,
+            report,
+            '佣兵团捐献',
+            'GuildHandler.DonateGold',
+            {'ItemID': '1', 'Count': 10},
+            skip_if=intv(guild.get('DayDonateGoldCount')) >= 10,
+            report_failure=True,
+        )
+        safe_call(
+            client,
+            report,
+            '佣兵团签到',
+            'GuildHandler.GuildMemberDayCheckReward',
+            skip_if=not guild.get('CanLastDayCheckReward'),
+            report_failure=True,
+        )
+    else:
+        report.skip('佣兵团签到')
+        report.skip('佣兵团捐献')
     safe_call(
         client,
         report,
@@ -1168,8 +1184,17 @@ def buy_secret_records(client, records, report):
 
 def run_secret_shop(client, login_data, report):
     records = secret_records(login_data)
-    refreshes = 0
+    account_save = login_data.setdefault('AccountSaveData', {})
+    refreshes = max(0, intv(account_save.get(
+        'RandomStoreDayRefreshCount')))
+    refresh_limit = max(0, intv(
+        client.config.get('RandomStoreDayRefreshLimit'),
+        DEFAULT_SECRET_SHOP_REFRESH_LIMIT,
+    ))
     while True:
+        if refreshes >= refresh_limit:
+            report.skip('神秘商店刷新')
+            return
         buy_secret_records(client, records, report)
         data = safe_call(
             client,
@@ -1184,6 +1209,7 @@ def run_secret_shop(client, login_data, report):
                 report.warn('神秘商店一次都没刷新成功')
             return
         refreshes += 1
+        account_save['RandomStoreDayRefreshCount'] = refreshes
         records = data.get('Records') or []
 
 
