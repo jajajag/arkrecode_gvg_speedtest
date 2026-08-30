@@ -3,14 +3,14 @@ import re
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .api import GameRequestError, oid
 from .database import MASTER_DB_PATH
 
 
-LOCAL_TZ = timezone(timedelta(hours=8))
+SERVER_TZ = timezone.utc
 HUNT_STATUS_ID = 'HuntActivity'
 HUNT_ELEMENTS = ('Fire', 'Ice', 'Earth', 'Light', 'Dark')
 HUNT_NAMES = dict(zip(HUNT_ELEMENTS, ('火', '水', '木', '光', '暗')))
@@ -82,12 +82,18 @@ def now_ms():
     return int(time.time() * 1000)
 
 
-def same_local_day(left_ms, right_ms=None):
+def same_server_day(left_ms, right_ms=None):
+    """Return whether two timestamps fall in the same UTC server day.
+
+    The game resets daily state at 00:00 UTC (08:00 in China), so converting
+    timestamps to China time before comparing dates would reset eight hours
+    too early.
+    """
     if not left_ms:
         return False
     right_ms = now_ms() if right_ms is None else int(right_ms)
-    left_day = datetime.fromtimestamp(left_ms / 1000, LOCAL_TZ).date()
-    right_day = datetime.fromtimestamp(right_ms / 1000, LOCAL_TZ).date()
+    left_day = datetime.fromtimestamp(left_ms / 1000, SERVER_TZ).date()
+    right_day = datetime.fromtimestamp(right_ms / 1000, SERVER_TZ).date()
     return left_day == right_day
 
 
@@ -614,7 +620,7 @@ def store_record_map(login_data):
 
 def store_bought_today(records, static_id):
     record = records.get(static_id) or {}
-    return same_local_day(date_ms(record.get('LastBuyTime')))
+    return same_server_day(date_ms(record.get('LastBuyTime')))
 
 
 def claim_daily_free_summon(client, records, report):
@@ -684,7 +690,7 @@ def run_basic_daily(client, login_data, event, report):
             report,
             '佣兵团签到',
             'GuildHandler.GuildMemberCheckIn',
-            skip_if=same_local_day(date_ms(guild.get('LastCheckInTime'))),
+            skip_if=same_server_day(date_ms(guild.get('LastCheckInTime'))),
             report_failure=True,
         )
         safe_call(
@@ -693,7 +699,7 @@ def run_basic_daily(client, login_data, event, report):
             '佣兵团捐献',
             'GuildHandler.DonateCourage',
             {'ItemID': '28', 'Count': 3},
-            skip_if=intv(guild.get('DayDonateCourageCount')) >= 3,
+            skip_if=intv(guild.get('DayDonateCourageCount')) > 0,
             report_failure=True,
         )
         safe_call(
@@ -702,7 +708,7 @@ def run_basic_daily(client, login_data, event, report):
             '佣兵团捐献',
             'GuildHandler.DonateGold',
             {'ItemID': '1', 'Count': 10},
-            skip_if=intv(guild.get('DayDonateGoldCount')) >= 10,
+            skip_if=intv(guild.get('DayDonateGoldCount')) > 0,
             report_failure=True,
         )
         safe_call(
@@ -721,7 +727,7 @@ def run_basic_daily(client, login_data, event, report):
         report,
         '签到',
         'MonthSignInHandler.SignIn',
-        skip_if=same_local_day(date_ms(month.get('LastSignInTime'))),
+        skip_if=same_server_day(date_ms(month.get('LastSignInTime'))),
     )
     if activity_id:
         safe_call(
@@ -730,7 +736,7 @@ def run_basic_daily(client, login_data, event, report):
             '签到',
             'WeekSignInHandler.SignIn',
             {'ActivityID': activity_id},
-            skip_if=same_local_day(date_ms(week_row.get('LastSignInTime'))),
+            skip_if=same_server_day(date_ms(week_row.get('LastSignInTime'))),
         )
     safe_call(client, report, '月卡礼包', 'ServerStatusHandler.Query')
     claim_daily_free_summon(client, records, report)
@@ -956,7 +962,7 @@ def run_npc_and_dispatch(client, login_data, team, report):
         report,
         '饭点体力',
         'TimingMealHandler.SentMeal',
-        skip_if=same_local_day(date_ms(timing.get('LastSentMailTime'))),
+        skip_if=same_server_day(date_ms(timing.get('LastSentMailTime'))),
     )
 
 
