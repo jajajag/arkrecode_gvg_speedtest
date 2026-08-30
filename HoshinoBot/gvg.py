@@ -61,6 +61,21 @@ async def run_update_job(service, bot=None, ev=None, notify_superuser=True,
             await report_to_superuser(message)
 
 
+async def run_daily_job(service, bot=None, ev=None, notify_superuser=True):
+    try:
+        result = await asyncio.to_thread(run_daily_sync)
+        message = daily_result_text(result)
+    except Exception as exc:
+        service.logger.exception(exc)
+        message = '日常清理失败：{}'.format(exc)
+    if bot is not None and ev is not None:
+        await bot.send(ev, message, at_sender=False)
+    else:
+        service.logger.info(message)
+    if notify_superuser:
+        await report_to_superuser(message)
+
+
 GVG_HELP = (
     '团战指令：\n'
     '团战 作业 角色1 角色2 角色3\n'
@@ -178,7 +193,10 @@ def register_gvg(service):
 
     @service.scheduled_job('cron', hour=8, minute=5)
     async def gvg_daily_update():
-        await run_update_job(service, run_daily=True)
+        try:
+            await run_update_job(service)
+        finally:
+            await run_daily_job(service)
 
     @service.on_prefix('团战')
     async def gvg_command(bot, ev):
@@ -207,13 +225,8 @@ def register_gvg(service):
                                at_sender=False)
                 return
             await bot.send(ev, '开始清理日常，请稍候。', at_sender=False)
-            try:
-                result = await asyncio.to_thread(run_daily_sync)
-                message = daily_result_text(result)
-            except Exception as exc:
-                service.logger.exception(exc)
-                message = '日常清理失败：{}'.format(exc)
-            await bot.send(ev, message, at_sender=False)
+            await run_daily_job(
+                service, bot=bot, ev=ev, notify_superuser=False)
             return
 
         if raw == '胜率表':

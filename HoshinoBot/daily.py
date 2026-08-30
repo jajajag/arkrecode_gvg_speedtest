@@ -623,7 +623,6 @@ def claim_daily_free_summon(client, records, report):
         report.skip('每日免费召唤')
         return
     buy_count = intv(record.get('BuyCount'))
-    free_count = intv(record.get('FreeBuyCount'))
     result = safe_call(
         client,
         report,
@@ -637,7 +636,7 @@ def claim_daily_free_summon(client, records, report):
             'Count': 1,
             'SelcetCostItemID': '',
         },
-        skip_if=buy_count >= free_count,
+        skip_if=buy_count >= 1,
         report_failure=True,
     )
     if result is not None:
