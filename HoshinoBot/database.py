@@ -2,7 +2,7 @@ import json
 import sqlite3
 import shutil
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .api import BASE_DIR, GameRequestError, INFO_IMAGE_LOCK
@@ -16,7 +16,7 @@ IMAGES_DIR = BASE_DIR / 'images'
 
 
 def today():
-    return datetime.now().strftime('%Y-%m-%d')
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
 
 def now_ms():

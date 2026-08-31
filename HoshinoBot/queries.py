@@ -2,7 +2,7 @@ import json
 import re
 import sqlite3
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from .api import GameRequestError
@@ -22,11 +22,6 @@ RECENT_DAYS = 30
 MILLIS_PER_DAY = 24 * 60 * 60 * 1000
 INFO_FORMAT = 'gvg_info_v1'
 MAX_WRONGBOOK_MATCHES = 10
-GVG_TIMEZONE = timezone(timedelta(hours=8))
-GVG_MATCH_START_HOUR = 8
-GVG_MATCH_START_WEEKDAYS = frozenset((0, 2, 4))  # Monday, Wednesday, Friday
-
-
 def encode_info_segments(segments):
     normalized = []
     for segment in segments:
@@ -144,17 +139,13 @@ def _role_name_map():
 
 
 def _gvg_match_date(start_ts):
-    """Return the Beijing-time start date of the GVG match containing a log.
+    """Return the UTC start date of the GVG match containing a log.
 
-    Matches run from 08:00 Monday/Wednesday/Friday until 08:00 the following
-    day.  Shifting by eight hours makes the whole match share its start date;
-    the weekday check excludes timestamps from the intervals between matches.
+    Matches run from 00:00 UTC Monday/Wednesday/Friday until 00:00 UTC the
+    following day. The weekday check excludes timestamps between matches.
     """
-    local_time = datetime.fromtimestamp(
-        int(start_ts) / 1000, timezone.utc
-    ).astimezone(GVG_TIMEZONE)
-    match_day = local_time - timedelta(hours=GVG_MATCH_START_HOUR)
-    if match_day.weekday() not in GVG_MATCH_START_WEEKDAYS:
+    match_day = datetime.fromtimestamp(int(start_ts) / 1000, timezone.utc)
+    if match_day.weekday() not in (0, 2, 4):
         return None
     return match_day.strftime('%Y-%m-%d')
 

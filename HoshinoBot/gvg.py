@@ -1,6 +1,7 @@
 import asyncio
 import random
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .api import BASE_DIR, INFO_IMAGE_LOCK, cache_info_images
@@ -184,6 +185,13 @@ def _render_player_segments(segments):
 _REGISTERED = False
 
 
+def _should_run_scheduled_update(now=None):
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is not None:
+        current = current.astimezone(timezone.utc)
+    return current.isoweekday() in (2, 4, 6)
+
+
 def register_gvg(service):
     global _REGISTERED
     if _REGISTERED:
@@ -191,10 +199,13 @@ def register_gvg(service):
     _REGISTERED = True
     init_database()
 
-    @service.scheduled_job('cron', hour=8, minute=5)
+    @service.scheduled_job('cron', hour=0, minute=5, timezone='UTC')
     async def gvg_daily_update():
         try:
-            await run_update_job(service)
+            if _should_run_scheduled_update():
+                await run_update_job(service)
+            else:
+                service.logger.info('今日跳过团战数据更新')
         finally:
             await run_daily_job(service)
 

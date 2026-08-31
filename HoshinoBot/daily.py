@@ -10,7 +10,6 @@ from .api import GameRequestError, oid
 from .database import MASTER_DB_PATH
 
 
-SERVER_TZ = timezone.utc
 HUNT_STATUS_ID = 'HuntActivity'
 HUNT_ELEMENTS = ('Fire', 'Ice', 'Earth', 'Light', 'Dark')
 HUNT_NAMES = dict(zip(HUNT_ELEMENTS, ('火', '水', '木', '光', '暗')))
@@ -92,8 +91,8 @@ def same_server_day(left_ms, right_ms=None):
     if not left_ms:
         return False
     right_ms = now_ms() if right_ms is None else int(right_ms)
-    left_day = datetime.fromtimestamp(left_ms / 1000, SERVER_TZ).date()
-    right_day = datetime.fromtimestamp(right_ms / 1000, SERVER_TZ).date()
+    left_day = datetime.fromtimestamp(left_ms / 1000, timezone.utc).date()
+    right_day = datetime.fromtimestamp(right_ms / 1000, timezone.utc).date()
     return left_day == right_day
 
 
