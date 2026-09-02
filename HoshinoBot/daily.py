@@ -557,14 +557,7 @@ def support_items(login_data):
     return counts
 
 
-def has_guild(login_data):
-    return bool(oid(get_nested(login_data, 'PlayerGuildInfo', 'GID')).strip())
-
-
 def run_guild_support(client, login_data, report):
-    if not has_guild(login_data):
-        report.skip('佣兵团支援')
-        return
     sups = support_items(login_data)
     if not sups.get('CUID'):
         report.skip('佣兵团支援')
@@ -608,6 +601,42 @@ def run_guild_support(client, login_data, report):
         )
 
 
+def run_guild_daily(client, login_data, report):
+    check_in = safe_call(
+        client,
+        report,
+        '佣兵团签到',
+        'GuildHandler.GuildMemberCheckIn',
+    )
+    if check_in is None:
+        return
+
+    run_guild_support(client, login_data, report)
+    safe_call(
+        client,
+        report,
+        '佣兵团签到',
+        'GuildHandler.GuildMemberDayCheckReward',
+        report_failure=True,
+    )
+    safe_call(
+        client,
+        report,
+        '佣兵团捐献',
+        'GuildHandler.DonateGold',
+        {'ItemID': '1', 'Count': 10},
+        report_failure=True,
+    )
+    safe_call(
+        client,
+        report,
+        '佣兵团捐献',
+        'GuildHandler.DonateCourage',
+        {'ItemID': '28', 'Count': 3},
+        report_failure=True,
+    )
+
+
 def store_record_map(login_data):
     result = {}
     for record in get_nested(login_data, 'StoreRecordContainer', 'Records') or []:
@@ -649,14 +678,9 @@ def claim_daily_free_summon(client, records, report):
 
 
 def run_basic_daily(client, login_data, event, report):
-    in_guild = has_guild(login_data)
-    if in_guild:
-        run_guild_support(client, login_data, report)
-    else:
-        report.skip('佣兵团支援')
+    run_guild_daily(client, login_data, report)
     reactor = login_data.get('ArkReactorData') or {}
     lab = login_data.get('ArkStarForceLabData') or {}
-    guild = login_data.get('PlayerGuildInfo') or {}
     records = store_record_map(login_data)
     month = login_data.get('MonthSignInData') or {}
     timing = login_data.get('TimingMailData') or {}
@@ -683,44 +707,6 @@ def run_basic_daily(client, login_data, event, report):
             route,
             skip_if=date_ms(lab.get(key)) > now_ms(),
         )
-    if in_guild:
-        safe_call(
-            client,
-            report,
-            '佣兵团签到',
-            'GuildHandler.GuildMemberCheckIn',
-            skip_if=same_server_day(date_ms(guild.get('LastCheckInTime'))),
-            report_failure=True,
-        )
-        safe_call(
-            client,
-            report,
-            '佣兵团捐献',
-            'GuildHandler.DonateCourage',
-            {'ItemID': '28', 'Count': 3},
-            skip_if=intv(guild.get('DayDonateCourageCount')) > 0,
-            report_failure=True,
-        )
-        safe_call(
-            client,
-            report,
-            '佣兵团捐献',
-            'GuildHandler.DonateGold',
-            {'ItemID': '1', 'Count': 10},
-            skip_if=intv(guild.get('DayDonateGoldCount')) > 0,
-            report_failure=True,
-        )
-        safe_call(
-            client,
-            report,
-            '佣兵团签到',
-            'GuildHandler.GuildMemberDayCheckReward',
-            skip_if=not guild.get('CanLastDayCheckReward'),
-            report_failure=True,
-        )
-    else:
-        report.skip('佣兵团签到')
-        report.skip('佣兵团捐献')
     safe_call(
         client,
         report,
