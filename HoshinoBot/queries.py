@@ -1,11 +1,13 @@
+import itertools
 import json
+import threading
 import re
 import sqlite3
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from .api import GameRequestError
+from .api import GameRequestError, oid, team_roles
 from .database import (
     ALIAS_PATH,
     DATA_DB_PATH,
@@ -22,6 +24,11 @@ RECENT_DAYS = 30
 MILLIS_PER_DAY = 24 * 60 * 60 * 1000
 INFO_FORMAT = 'gvg_info_v1'
 MAX_WRONGBOOK_MATCHES = 10
+STATS_LOCK = threading.Lock()
+SPEED_PARTS = ("Weapon", "Head", "Body", "Necklace", "Ring")
+SPEED_SET_BASE = 189
+BROKEN_SET_BASE = 169
+
 def encode_info_segments(segments):
     normalized = []
     for segment in segments:
@@ -330,12 +337,6 @@ def resolve_player(query, conn=None, current_only=True):
             rows = conn.execute(
                 'SELECT * FROM gvg_members ORDER BY name, cuid').fetchall()
         query = str(query).strip()
-        if re.fullmatch(r'\d{9}', query):
-            by_cuid = [row for row in rows if str(row['cuid']) == query]
-            if by_cuid:
-                return by_cuid[0], None
-            return None, '没有找到玩家ID“{}”。'.format(query)
-
         query_folded = _fold(query)
         exact_name = [row for row in rows
                       if _fold(row['name']) == query_folded]
@@ -343,6 +344,10 @@ def resolve_player(query, conn=None, current_only=True):
             return exact_name[0], None
         if len(exact_name) > 1:
             return None, _ambiguous_players(exact_name)
+
+        by_cuid = [row for row in rows if str(row['cuid']) == query]
+        if by_cuid:
+            return by_cuid[0], None
 
         partial = [row for row in rows
                    if query_folded in _fold(row['name'])]
@@ -694,3 +699,128 @@ def format_player(player_query, db_path=DATA_DB_PATH):
         return '\n'.join(lines)
     finally:
         conn.close()
+
+
+def equipment_pool(cards):
+    """Keep the latest observation of each item across newest-first snapshots."""
+    pool, seen = [], set()
+    for card in cards:
+        roles = team_roles((card.get('PVPInfo') or {}).get('DefenceTeam') or {})
+        roles += [item.get('Role') or {} for item in
+                  (card.get('BattleSupportData') or {}).get('RoleDataList') or []]
+        for role in roles:
+            for part, equip in (role.get('EquipmentMap') or {}).items():
+                if part not in SPEED_PARTS:
+                    continue
+                identity = oid(equip.get('_id')) or json.dumps(equip, sort_keys=True)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                props = (equip.get('SubProps') or {}).get('SourceValues') or []
+                speed = next((
+                    float(prop.get('Value', prop.get('SValue', 0)) or 0)
+                    for prop in props if prop.get('PropertyType') == 'SpeedValue'
+                ), 0)
+                pool.append(dict(equip_id=identity, equip_type=part,
+                                 set_name=equip.get('Set'), speed=speed))
+    return pool
+
+
+def best_speed_combo(equips, used=None):
+    """pvp_speed.py convention: five non-shoe pieces, rabbit bases 169/189."""
+    used = used or set()
+    by_part = {part: [] for part in SPEED_PARTS}
+    for equip in equips:
+        if equip['equip_id'] not in used and equip['equip_type'] in by_part:
+            by_part[equip['equip_type']].append(equip)
+    # For each part, only the fastest Speed/non-Speed item can win.
+    # Filter after excluding used IDs so second speed still sees the runners-up.
+    for part, items in by_part.items():
+        fastest = {}
+        for item in items:
+            is_speed = item['set_name'] == 'Speed'
+            if is_speed not in fastest or item['speed'] > fastest[is_speed]['speed']:
+                fastest[is_speed] = item
+        best_ids = {item['equip_id'] for item in fastest.values()}
+        by_part[part] = [item for item in items if item['equip_id'] in best_ids]
+    best = None
+    for combo in itertools.product(*(by_part[part] for part in SPEED_PARTS)):
+        speed_set = sum(item['set_name'] == 'Speed' for item in combo) >= 3
+        base = SPEED_SET_BASE if speed_set else BROKEN_SET_BASE
+        total = base + sum(item['speed'] for item in combo)
+        if best is None or total > best[0]:
+            best = total, combo, '速度套' if speed_set else '散件'
+    return best
+
+
+def theoretical_builds(cards):
+    equips = equipment_pool(cards)
+    first = best_speed_combo(equips)
+    used = {item['equip_id'] for item in first[1]} if first else set()
+    return first, best_speed_combo(equips, used)
+
+
+def defence_role_line(role, stats, master):
+    equips = (role.get('EquipmentMap') or {}).values()
+    counts = Counter(equip.get('Set') for equip in equips)
+    details = []
+    for set_id, count in counts.items():
+        required = int((master.equipment_sets.get(set_id) or {}).get('Count') or 99)
+        active = count // required
+        if active:
+            name = master.equipment_set_name(set_id)
+            details.append('{}{}'.format(active if active > 1 else '', name))
+    bond = role.get('ArtifactData') or {}
+    if bond:
+        details.append('{}级{}'.format(
+            bond.get('LV', '?'), master.artifact_name(bond.get('StaticID'))))
+    return '{}：{}生 {}'.format(
+        master.role_name(role['StaticID']), round(stats['HP']), ' / '.join(details)).rstrip()
+
+
+def format_defence(query, db_path=DATA_DB_PATH):
+    init_database(db_path)
+    conn = connect_data(db_path)
+    try:
+        player, error = resolve_player(query, conn)
+        if error:
+            return error
+        rows = conn.execute('SELECT * FROM gvg_snapshots WHERE cuid=? '
+                            'ORDER BY snapshot_date DESC', (player['cuid'],)).fetchall()
+    finally:
+        conn.close()
+    snapshots = {}
+    for row in rows:
+        snapshots.setdefault(row['kind'], row)
+    defence = snapshots.get('defence')
+    if defence is None:
+        return '该玩家暂无团战防守数据，请先更新数据。'
+    from ..Frida import helper
+    with STATS_LOCK:
+        master = helper.load_master_data(MASTER_DB_PATH)
+        lines = ['{} ｜ CUID {}'.format(player['name'], player['cuid']),
+                 '头像：{} ｜ 防守日期：{}'.format(
+                     master.role_name(player['avatar_role_id']), defence['snapshot_date'])]
+        teams = json.loads(defence['payload'])['DefenceTeamData']
+        for key, label in (('FirstTeam', '上半'), ('SecondTeam', '下半')):
+            lines.append('── {} ──'.format(label))
+            roles = team_roles(teams.get(key) or {})
+            for role, stats in zip(roles, helper.calculate_team_stats(roles)):
+                lines.append(defence_role_line(role, stats, master))
+        equipment = snapshots.get('equipment')
+        if equipment:
+            cards = [json.loads(row['payload']) for row in rows if row['kind'] == 'equipment']
+            lines.append('── 理论配装（兔子基准）──')
+            for label, build in zip(('一速', '二速'), theoretical_builds(cards)):
+                if build is None:
+                    lines.append('{}：已知装备不足五个部位'.format(label))
+                    continue
+                total, combo, mode = build
+                pieces = ' / '.join('{} {:g}'.format(
+                    master.equipment_set_name(item['set_name']), item['speed']) for item in combo)
+                lines.append('{}：{:g}（{}）\n{}'.format(label, total, mode, pieces))
+            lines.append('装备顺序：武器／头／衣／项链／戒指')
+            lines.append('最新采集：{}；汇总历史装备，同件取最新记录；二速排除一速已用装备。'.format(equipment['snapshot_date']))
+        else:
+            lines.append('暂未采集到竞技场／助战装备。')
+        return '\n'.join(lines)

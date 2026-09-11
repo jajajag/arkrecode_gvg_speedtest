@@ -1,6 +1,12 @@
 {
-  "Token": "请填写 Token",
-  "GuildID": "请填写自己团的 GID",
+  "MainAccount": {
+    "Token": "大号 Token",
+    "GuildID": "大号所在团 GID"
+  },
+  "SubAccount": {
+    "Token": "小号 Token",
+    "GuildID": "小号所在团 GID"
+  },
   "RandomStoreDayRefreshLimit": 30,
   "DailyHuntRuns": {
     "Fire": 1,

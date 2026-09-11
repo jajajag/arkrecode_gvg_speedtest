@@ -1,5 +1,4 @@
 import base64
-import base64
 import hashlib
 import json
 import random
@@ -125,23 +124,46 @@ def _read_account_file(path):
     return config
 
 
-def load_config(path=ACCOUNT_PATH):
+ACCOUNT_KEYS = {'main': 'MainAccount', 'alt': 'SubAccount'}
+
+
+def account_key(config, account):
+    if account not in ACCOUNT_KEYS:
+        raise ConfigError('未知账号：{}'.format(account))
+    key = ACCOUNT_KEYS[account]
+    # Older single-account files keep the main credentials at the top level.
+    return None if account == 'main' and key not in config else key
+
+
+def load_config(path=ACCOUNT_PATH, account='main'):
     with _ACCOUNT_FILE_LOCK:
         config = _read_account_file(path)
-    required = ('Token', 'GuildID')
-    missing = [key for key in required
-               if not str(config.get(key, '')).strip()]
+    key = account_key(config, account)
+    selected = config if key is None else config.get(key)
+    if not isinstance(selected, dict):
+        raise ConfigError('account.json 缺少 {} 配置'.format(key))
+    common = {name: value for name, value in config.items()
+              if name not in (*ACCOUNT_KEYS.values(), 'Token', 'GuildID')}
+    common.update(selected)
+    result = {name: value for name, value in common.items()
+              if name not in ACCOUNT_KEYS.values()}
+    missing = [name for name in ('Token', 'GuildID')
+               if not str(result.get(name) or '').strip()]
     if missing:
-        raise ConfigError('account.json 缺少：{}'.format('、'.join(missing)))
-    return dict(config)
+        raise ConfigError('{} 缺少：{}'.format(key or '大号', '、'.join(missing)))
+    return result
 
 
-def save_config(account_config, path=ACCOUNT_PATH):
+def save_token(token, path=ACCOUNT_PATH, account='main'):
+    """Merge only the refreshed credential; never overwrite the other account."""
     path = Path(path)
     with _ACCOUNT_FILE_LOCK:
         config = _read_account_file(path)
-        config.update(dict(account_config))
-        path.parent.mkdir(parents=True, exist_ok=True)
+        key = account_key(config, account)
+        selected = config if key is None else config.get(key)
+        if not isinstance(selected, dict):
+            raise ConfigError('account.json 缺少 {} 配置'.format(key))
+        selected['Token'] = token
         temp_path = path.with_suffix(path.suffix + '.tmp')
         with temp_path.open('w', encoding='utf-8') as file:
             json.dump(config, file, ensure_ascii=False, indent=2)
@@ -149,7 +171,8 @@ def save_config(account_config, path=ACCOUNT_PATH):
 
 
 class GameClient:
-    def __init__(self, config, account_path=ACCOUNT_PATH, session=None):
+    def __init__(self, config, account_path=ACCOUNT_PATH, session=None, account="main"):
+        self.account = account
         self.config = config
         self.account_path = Path(account_path)
         self.http = session or requests.Session()
@@ -224,7 +247,7 @@ class GameClient:
             if not login_id or not login_token or not refresh_token:
                 raise GameRequestError('刷新 Token 的响应字段不完整')
             self.config['Token'] = refresh_token
-            save_config(self.config, self.account_path)
+            save_token(refresh_token, self.account_path, self.account)
 
         result = self._send_route('AccountHandler.Login', {
             'LoginID': login_id,
@@ -333,16 +356,21 @@ _SHARED_CLIENTS = {}
 _SHARED_CLIENT_LOCK = threading.Lock()
 
 
-def get_game_client(reload_config=False):
-    """Return the process-wide client for the configured game account."""
+def get_game_client(reload_config=False, account='main'):
+    """Independent sessions backed by the same account.json."""
     with _SHARED_CLIENT_LOCK:
-        key = 'default'
-        if reload_config or key not in _SHARED_CLIENTS:
-            old_client = _SHARED_CLIENTS.get(key)
+        if reload_config or account not in _SHARED_CLIENTS:
+            config = load_config(account=account)
+            old_client = _SHARED_CLIENTS.get(account)
             if old_client is not None:
                 old_client.http.close()
-            _SHARED_CLIENTS[key] = GameClient(load_config())
-        return _SHARED_CLIENTS[key]
+            _SHARED_CLIENTS[account] = GameClient(config, account=account)
+        return _SHARED_CLIENTS[account]
+
+
+def team_roles(team):
+    return [role for _, role in sorted(
+        (team.get('PositionRoleMap') or {}).items(), key=lambda pair: int(pair[0]))]
 
 
 def query_guild(client, guild_id):
@@ -364,7 +392,7 @@ def query_top_guilds(client):
     ranked = rank_data.get('GuildWarCampaignInfoList') or []
     guilds = []
     seen_ids = set()
-    for item in ranked:
+    for item in ranked[:20]:
         guild_id = oid((item.get('GuildSubInfo') or {}).get('_id'))
         if not guild_id or guild_id in seen_ids:
             continue

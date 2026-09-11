@@ -45,6 +45,13 @@ def init_database(path=DATA_DB_PATH):
     try:
         conn.executescript(
             '''
+            CREATE TABLE IF NOT EXISTS gvg_snapshots (
+                cuid INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                snapshot_date TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY (cuid, kind, snapshot_date)
+            );
             CREATE TABLE IF NOT EXISTS gvg_members (
                 cuid INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -403,3 +410,13 @@ def existing_battle_ids(battle_ids, db_path=DATA_DB_PATH, conn=None):
     finally:
         if owns_connection:
             conn.close()
+
+
+def save_snapshot(cuid, kind, payload, db_path=DATA_DB_PATH):
+    conn = connect_data(db_path)
+    try:
+        with conn:
+            conn.execute('INSERT OR REPLACE INTO gvg_snapshots VALUES (?, ?, ?, ?)',
+                         (int(cuid), kind, today(), json.dumps(payload, ensure_ascii=False)))
+    finally:
+        conn.close()

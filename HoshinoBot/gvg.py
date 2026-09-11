@@ -1,12 +1,12 @@
 import asyncio
 import random
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 
 from .api import BASE_DIR, INFO_IMAGE_LOCK, cache_info_images
 from .database import IMAGES_DIR, init_database
 from .queries import (
+    format_defence,
     format_member_history,
     format_player,
     format_solutions,
@@ -81,6 +81,7 @@ GVG_HELP = (
     '团战指令：\n'
     '团战 作业 角色1 角色2 角色3\n'
     '团战 胜率表\n'
+    '团战 数据 玩家名或CUID\n'
     '团战 错题本 团名 [场数，最多10场]\n'
     '团战 一速 玩家名或UID 速度\n'
     '团战 信息 玩家名或UID 内容或图片\n'
@@ -185,13 +186,6 @@ def _render_player_segments(segments):
 _REGISTERED = False
 
 
-def _should_run_scheduled_update(now=None):
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is not None:
-        current = current.astimezone(timezone.utc)
-    return current.isoweekday() in (2, 4, 6)
-
-
 def register_gvg(service):
     global _REGISTERED
     if _REGISTERED:
@@ -199,15 +193,9 @@ def register_gvg(service):
     _REGISTERED = True
     init_database()
 
-    @service.scheduled_job('cron', hour=0, minute=5, timezone='UTC')
+    @service.scheduled_job('cron', hour=0, minute=1, timezone='UTC')
     async def gvg_daily_update():
-        try:
-            if _should_run_scheduled_update():
-                await run_update_job(service)
-            else:
-                service.logger.info('今日跳过团战数据更新')
-        finally:
-            await run_daily_job(service)
+        await run_update_job(service, run_daily=True)
 
     @service.on_prefix('团战')
     async def gvg_command(bot, ev):
@@ -238,6 +226,16 @@ def register_gvg(service):
             await bot.send(ev, '开始清理日常，请稍候。', at_sender=False)
             await run_daily_job(
                 service, bot=bot, ev=ev, notify_superuser=False)
+            return
+
+        if raw == '数据' or re.match(r'数据\s', raw):
+            query = raw[len('数据'):].strip()
+            try:
+                message = (await asyncio.to_thread(format_defence, query)
+                           if query else '格式：团战 数据 玩家名或CUID')
+            except Exception as exc:
+                message = '查询失败：{}'.format(exc)
+            await bot.send(ev, message, at_sender=False)
             return
 
         if raw == '胜率表':

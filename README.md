@@ -65,7 +65,7 @@ git clone https://github.com/jajajag/arkrecode_gvg_speedtest
 pip install requests UnityPy
 ```
 
-4. 复制 `HoshinoBot/data/account_example.json` 为 `HoshinoBot/data/account.json`，填写一个账号的 Token 和自己团的 GID。
+4. 复制 `HoshinoBot/data/account_example.json` 为 `HoshinoBot/data/account.json`，在同一文件的 `MainAccount`、`SubAccount` 中填写大号、小号的 Token 和 GID。通用日常选项放在顶层，账号内可覆盖同名选项；刷新 Token 只更新对应账号。旧版顶层 `Token` / `GuildID` 仍作为大号读取，只需补充 `SubAccount`。
 
 5. 重启 HoshinoBot 后，发送 `团战测速` 或 `帮助团战测速` 查看用法。
 
@@ -76,6 +76,7 @@ pip install requests UnityPy
 ```text
 团战 作业 角色1 角色2 角色3
 团战 胜率表
+团战 数据 玩家名或CUID
 团战 一速 玩家名或UID 速度
 团战 信息 玩家名或UID 内容或图片
 团战 历史 玩家名或UID
@@ -130,3 +131,30 @@ pip install requests UnityPy
 - [HoshinoBot](https://github.com/Ice9Coffee/HoshinoBot)
 - [ArkRecodetools](https://github.com/zzasqas/ArkRecodetools/blob/main/guild-battle.html)
 - [openrubi](https://github.com/StardustChocolate/openrubi) 的角色别名表
+
+### 每日采集流程
+
+每天北京时间 08:01（UTC 00:01）依次执行大号日常、大号完整团战数据查询、小号日常。
+以本次完整团战响应中的敌方防守名单判断是否开战，不使用固定星期判断。
+有敌方防守时保存名单及原始防守数据，再用小号逐人采集竞技场防守和助战装备；
+没有敌方防守时清空当前对手名单，使用小号采集排行榜前 20 团的攻防记录。
+响应缺失或格式异常会报错，不当作休战；历史防守、装备按 UTC 日期保留。
+
+`团战 数据 xxx` 优先精确匹配名字，再匹配 CUID，最后模糊匹配名字；同名提示 CUID 和头像角色。
+输出上、下半角色、生命、套装、羁绊及采集日期。理论配装与 `pvp_speed.py` 一致：
+只取武器、头、衣、项链、戒指的速度副词条；散件基准 169，五件中至少三件速度套时基准 189。
+先选一速，再排除已用装备选二速，并输出各部位套装和速度。汇总历史采集装备，同一件装备只保留最新属性。
+这些结果是兔子基准的已知装备组合，不代表实际团战速度。
+`团战 更新数据` 执行双账号采集但不清日常，`团战 清日常` 依次清理两个账号。
+
+### 插件代码结构
+
+- `gvg.py`：机器人指令、定时任务入口。
+- `updater.py`：双账号执行顺序、团战及装备采集。
+- `daily.py`：日常清理。
+- `queries.py`：玩家匹配、统计查询、防守展示和理论配装。
+- `database.py`：建表、迁移、名单和快照存储。
+- `api.py`：账号配置、会话和游戏请求；`master.py`：静态数据更新。
+- `speed.py`：原有行动条测速算法。`frame_buffer_ark.py` 是独立的 Windows 逐帧工具，不参与机器人运行。
+
+防守属性计算复用 `Frida/helper.py`，不复制第二套属性公式。

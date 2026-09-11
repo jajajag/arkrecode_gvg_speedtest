@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 
 import requests
@@ -7,10 +8,10 @@ from .api import (
     GameRequestError,
     get_game_client,
     oid,
+    team_roles,
     query_bulletin,
     query_battle_detail,
     query_member_logs,
-    query_guild,
     query_top_guilds,
 )
 from .database import (
@@ -22,12 +23,15 @@ from .database import (
     init_database,
     meta_get,
     meta_set,
-    replace_current_members,
     save_battle_rows,
+    save_snapshot,
+    replace_current_members,
     update_our_guild_meta,
 )
 from .daily import run_daily_cleanup
 from .master import update_master_db
+
+WORKFLOW_LOCK = threading.Lock()
 
 # Borrowed from StardustChocolate/openrubi
 ALIAS_URL = (
@@ -36,35 +40,58 @@ ALIAS_URL = (
 )
 
 
-def partial_guild_info(data):
-    guild = (data or {}).get('GuildData') or {}
-    info = (
-        guild.get('Info')
-        or guild.get('GuildInfo')
-        or guild.get('GuildSubInfo')
-        or guild
-    )
-    return {
-        'id': oid(info.get('_id') or guild.get('_id')),
-        'name': str(info.get('Name') or guild.get('Name') or ''),
-    }
+def collect_defences(data, db_path=DATA_DB_PATH):
+    war = data.get('GuildWarData')
+    if not isinstance(war, dict):
+        raise GameRequestError('团战响应缺少有效 GuildWarData，无法判断开战状态')
+    def guild(camp):
+        info = (camp or {}).get('GuildInfo') or {}
+        return {'id': oid(info.get('_id')), 'name': str(info.get('Name') or '')}
+    our = guild(war.get('MyCampData'))
+    if not our['name']:
+        raise GameRequestError('团战响应缺少我方公会信息')
+    update_our_guild_meta(our, db_path)
+    camp = war.get('EnemyCampData') or {}
+    enemy = guild(camp)
+    players = camp.get('PlayerInfoList') or []
+    if not isinstance(players, list):
+        raise GameRequestError('敌方防守列表格式异常')
+    members = []
+    for index, player in enumerate(players, 1):
+        info = player.get('PlayerInfo') or {}
+        defence = player.get('DefenceTeamData')
+        if info.get('CUID') is None or not isinstance(defence, dict):
+            raise GameRequestError('敌方成员缺少 CUID 或防守数据')
+        member = dict(cuid=int(info['CUID']), name=str(info.get('Name') or info['CUID']),
+                      avatar_role_id=str(info.get('LeaderSID') or ''), order=index)
+        for field, key in (('first', 'FirstTeam'), ('second', 'SecondTeam')):
+            roles = team_roles(defence.get(key) or {})
+            if len(roles) != 3:
+                raise GameRequestError('敌方防守阵容不完整，暂不更新当前名单')
+            member[field] = [(pos, role['StaticID']) for pos, role in enumerate(roles)]
+        members.append(member)
+    if members and not enemy['name']:
+        raise GameRequestError('敌方防守存在但缺少公会信息')
+    replace_current_members(members, enemy, db_path)
+    for member, player in zip(members, players):
+        save_snapshot(member['cuid'], 'defence', player, db_path)
+    return our, enemy, members
 
 
-def partial_enemy_guild_id(data):
-    if isinstance(data, dict):
-        candidate = data.get('EnemyGuildID')
-        if candidate:
-            return oid(candidate)
-        for value in data.values():
-            guild_id = partial_enemy_guild_id(value)
-            if guild_id:
-                return guild_id
-    elif isinstance(data, list):
-        for value in data:
-            guild_id = partial_enemy_guild_id(value)
-            if guild_id:
-                return guild_id
-    return ''
+def collect_equipment(client, members, db_path=DATA_DB_PATH):
+    saved, failures = 0, []
+    for member in members:
+        try:
+            card = client.call('AccountHandler.QueryPlayerCardData',
+                               {'CUID': member['cuid']}, required_key='BattleSupportData')
+            if not isinstance(card.get('PVPInfo'), dict):
+                raise GameRequestError('玩家卡缺少竞技场防守数据')
+            save_snapshot(member['cuid'], 'equipment', card, db_path)
+            saved += 1
+        except Exception as exc:
+            failures.append('装备采集 {}（{}）失败：{}'.format(
+                member['name'], member['cuid'], exc))
+    return saved, failures
 
 
 def guild_members(guild_data):
@@ -80,22 +107,6 @@ def guild_members(guild_data):
     if not isinstance(members, list):
         raise GameRequestError('公会响应缺少成员列表')
     return members
-
-
-def guild_member_snapshots(guild_data):
-    result = []
-    for order, member in enumerate(guild_members(guild_data), 1):
-        player = member.get('PlayerInfo') or member
-        cuid = player.get('CUID')
-        if cuid is None:
-            raise GameRequestError('公会成员中有成员缺少 CUID')
-        result.append({
-            'cuid': int(cuid),
-            'name': str(player.get('Name') or cuid),
-            'avatar_role_id': str(player.get('LeaderSID') or ''),
-            'order': order,
-        })
-    return result
 
 
 def collect_gvg_battle_refs(client, guild_data_list):
@@ -259,21 +270,29 @@ def update_master(bulletin, http):
 
 
 def update_all_sync(run_daily=False):
+    if not WORKFLOW_LOCK.acquire(blocking=False):
+        raise GameRequestError('已有日常或数据采集任务运行中')
+    try:
+        return _update_all_sync(run_daily)
+    finally:
+        WORKFLOW_LOCK.release()
+
+
+def cleanup_account(client, label, summaries, warnings):
+    """Keep failures local so the next account can still run its daily tasks."""
+    try:
+        report = run_daily_cleanup(client, client.login_data)
+        summaries.append(label + '：' + (report.get('summary') or '完成'))
+        warnings.extend(label + '：' + item for item in report['warnings'])
+    except Exception as exc:
+        warnings.append('{}日常失败：{}'.format(label, exc))
+
+
+def _update_all_sync(run_daily=False):
     init_database()
-    client = get_game_client(reload_config=True)
+    client = get_game_client(reload_config=True, account='main')
+    alt = get_game_client(reload_config=True, account='alt')
     client.login(attempts=3, force=True)
-    our_guild_id = str(client.config.get('GuildID') or '').strip()
-    if not our_guild_id:
-        raise GameRequestError('account.json 缺少 GuildID')
-
-    our_guild_data = query_guild(client, our_guild_id)
-    our_guild = partial_guild_info(our_guild_data)
-    if not our_guild['name']:
-        raise GameRequestError('公会响应缺少我方团信息')
-    our_guild['id'] = our_guild['id'] or our_guild_id
-    update_our_guild_meta(our_guild)
-    enemy_guild_id = partial_enemy_guild_id(our_guild_data)
-
     warnings = []
     master_changed = False
     alias_count = 0
@@ -289,6 +308,18 @@ def update_all_sync(run_daily=False):
         except Exception as exc:
             warnings.append('角色别名表下载失败：{}'.format(exc))
 
+    daily_summaries = []
+    if run_daily:
+        cleanup_account(client, '大号', daily_summaries, warnings)
+    try:
+        war = client.call('GuildWarHandler.QueryFullGuildWarData', {},
+                          required_key='GuildWarData')
+        our_guild, enemy_guild, members = collect_defences(war)
+    finally:
+        alt.login(attempts=3, force=True)
+        if run_daily:
+            cleanup_account(alt, '小号', daily_summaries, warnings)
+
     result = {
         'our_guild': our_guild['name'],
         'enemy_guild': None,
@@ -301,48 +332,41 @@ def update_all_sync(run_daily=False):
         'warnings': warnings,
     }
 
-    if enemy_guild_id:
-        enemy_guild_data = query_guild(client, enemy_guild_id)
-        enemy_guild = partial_guild_info(enemy_guild_data)
-        if not enemy_guild['name']:
-            raise GameRequestError('公会响应缺少敌方团信息')
-        enemy_guild['id'] = enemy_guild['id'] or enemy_guild_id
-        members = guild_member_snapshots(enemy_guild_data)
-        if not members:
-            raise GameRequestError('敌方公会没有成员数据')
-        replace_current_members(members, enemy_guild)
+    result['daily'] = '；'.join(daily_summaries)
+    if members:
         result['enemy_guild'] = enemy_guild['name']
         result['members'] = len(members)
-        battle_sources = [our_guild_data, enemy_guild_data]
+        saved, failures = collect_equipment(alt, members)
+        result['equipment'] = saved
+        warnings.extend(failures)
     else:
-        ranked_guilds = query_top_guilds(client)
+        ranked_guilds = query_top_guilds(alt)
         result['ranked_guilds'] = len(ranked_guilds)
-        battle_sources = ranked_guilds
-    battle_result = update_gvg_battles(client, battle_sources)
-    result['battles'] = battle_result['saved']
-    if battle_result['member_failures']:
-        warnings.append('有 {} 名成员日志查询失败，已跳过'.format(
-            battle_result['member_failures']))
-    if battle_result['detail_failures']:
-        warnings.append('有 {} 场战斗详情查询失败，已跳过'.format(
-            battle_result['detail_failures']))
-    if battle_result['parse_failures']:
-        warnings.append('有 {} 场战斗详情解析失败，已跳过'.format(
-            battle_result['parse_failures']))
-    if run_daily:
-        try:
-            daily_result = run_daily_cleanup(client, client.login_data)
-            result['daily'] = daily_result.get('summary')
-            warnings.extend(daily_result['warnings'])
-        except Exception as exc:
-            warnings.append('日常清理失败：{}'.format(exc))
+        battle_result = update_gvg_battles(alt, ranked_guilds)
+        result['battles'] = battle_result['saved']
+        for key, label in (('member_failures', '成员日志'),
+                           ('detail_failures', '战斗详情'),
+                           ('parse_failures', '战斗解析')):
+            if battle_result[key]:
+                warnings.append('{}失败 {} 条'.format(label, battle_result[key]))
     return result
 
 
 def run_daily_sync():
-    client = get_game_client(reload_config=True)
-    login_data = client.login(attempts=3, force=True)
-    return run_daily_cleanup(client, login_data)
+    if not WORKFLOW_LOCK.acquire(blocking=False):
+        raise GameRequestError('已有日常或数据采集任务运行中')
+    try:
+        summaries, warnings = [], []
+        for account, label in (('main', '大号'), ('alt', '小号')):
+            try:
+                client = get_game_client(reload_config=True, account=account)
+                client.login(attempts=3, force=True)
+                cleanup_account(client, label, summaries, warnings)
+            except Exception as exc:
+                warnings.append('{}：{}'.format(label, exc))
+        return {'summary': '；'.join(summaries), 'warnings': warnings}
+    finally:
+        WORKFLOW_LOCK.release()
 
 
 def daily_result_text(result):
@@ -368,6 +392,8 @@ def update_result_text(result):
         parts.append('敌方成员 {} 人'.format(result['members']))
     if result['battles'] is not None:
         parts.append('团战战斗新增 {} 场'.format(result['battles']))
+    if 'equipment' in result:
+        parts.append('装备采集 {} 人'.format(result['equipment']))
     parts.append('别名 {} 条'.format(result['aliases']))
     parts.append('master.db {}'.format(
         '已更新' if result['master_changed'] else '无需更新'))
