@@ -127,31 +127,22 @@ def _read_account_file(path):
 ACCOUNT_KEYS = {'main': 'MainAccount', 'alt': 'SubAccount'}
 
 
-def account_key(config, account):
+def account_key(account):
     if account not in ACCOUNT_KEYS:
         raise ConfigError('未知账号：{}'.format(account))
-    key = ACCOUNT_KEYS[account]
-    # Older single-account files keep the main credentials at the top level.
-    return None if account == 'main' and key not in config else key
+    return ACCOUNT_KEYS[account]
 
 
 def load_config(path=ACCOUNT_PATH, account='main'):
     with _ACCOUNT_FILE_LOCK:
         config = _read_account_file(path)
-    key = account_key(config, account)
-    selected = config if key is None else config.get(key)
+    key = account_key(account)
+    selected = config.get(key)
     if not isinstance(selected, dict):
         raise ConfigError('account.json 缺少 {} 配置'.format(key))
-    common = {name: value for name, value in config.items()
-              if name not in (*ACCOUNT_KEYS.values(), 'Token', 'GuildID')}
-    common.update(selected)
-    result = {name: value for name, value in common.items()
-              if name not in ACCOUNT_KEYS.values()}
-    missing = [name for name in ('Token', 'GuildID')
-               if not str(result.get(name) or '').strip()]
-    if missing:
-        raise ConfigError('{} 缺少：{}'.format(key or '大号', '、'.join(missing)))
-    return result
+    if not str(selected.get('Token') or '').strip():
+        raise ConfigError('{} 缺少：Token'.format(key))
+    return dict(selected)
 
 
 def save_token(token, path=ACCOUNT_PATH, account='main'):
@@ -159,8 +150,8 @@ def save_token(token, path=ACCOUNT_PATH, account='main'):
     path = Path(path)
     with _ACCOUNT_FILE_LOCK:
         config = _read_account_file(path)
-        key = account_key(config, account)
-        selected = config if key is None else config.get(key)
+        key = account_key(account)
+        selected = config.get(key)
         if not isinstance(selected, dict):
             raise ConfigError('account.json 缺少 {} 配置'.format(key))
         selected['Token'] = token

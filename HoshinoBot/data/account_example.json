@@ -1,19 +1,26 @@
 {
   "MainAccount": {
     "Token": "大号 Token",
-    "GuildID": "大号所在团 GID"
+    "RandomStoreDayRefreshLimit": 30,
+    "DailyHuntRuns": {
+      "Fire": 1,
+      "Ice": 1,
+      "Earth": 1,
+      "Light": 1,
+      "Dark": 1
+    },
+    "ActivitySupportCUID": 119413335
   },
   "SubAccount": {
     "Token": "小号 Token",
-    "GuildID": "小号所在团 GID"
-  },
-  "RandomStoreDayRefreshLimit": 30,
-  "DailyHuntRuns": {
-    "Fire": 1,
-    "Ice": 1,
-    "Earth": 1,
-    "Light": 1,
-    "Dark": 1
-  },
-  "ActivitySupportCUID": 119413335
+    "RandomStoreDayRefreshLimit": 30,
+    "DailyHuntRuns": {
+      "Fire": 1,
+      "Ice": 1,
+      "Earth": 1,
+      "Light": 1,
+      "Dark": 1
+    },
+    "ActivitySupportCUID": 119413335
+  }
 }
