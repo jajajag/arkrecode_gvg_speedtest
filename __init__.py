@@ -166,3 +166,9 @@ async def overtake(bot, ev: CQEvent):
 
 
 register_gvg(sv)
+
+# 临时库存监控：文件删除后自动跳过，不影响原插件加载。
+from importlib.util import find_spec as _find_spec
+if _find_spec(__name__ + '.temp_greencloud_watch') is not None:
+    from .temp_greencloud_watch import register as _register_greencloud_watch
+    _register_greencloud_watch(sv)
