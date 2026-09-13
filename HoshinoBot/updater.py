@@ -289,11 +289,30 @@ def cleanup_account(client, label, summaries, warnings):
 
 
 def _update_all_sync(run_daily=False):
+    progress = {
+        '大号日常': '未执行' if run_daily else '未执行（本次仅更新数据）',
+        '大号数据查询': '未执行',
+        '小号日常': '未执行' if run_daily else '未执行（本次仅更新数据）',
+        '小号数据采集': '未执行',
+    }
+    warnings = []
+    try:
+        result = _update_all_with_progress(run_daily, progress, warnings)
+    except Exception as exc:
+        for name, status in progress.items():
+            if status == '运行中':
+                progress[name] = '失败：{}'.format(exc)
+        return {'progress': progress, 'warnings': warnings,
+                'error': str(exc)}
+    result['progress'] = progress
+    return result
+
+
+def _update_all_with_progress(run_daily, progress, warnings):
     init_database()
     client = get_game_client(reload_config=True, account='main')
     alt = get_game_client(reload_config=True, account='alt')
     client.login(attempts=3, force=True)
-    warnings = []
     master_changed = False
     alias_count = 0
     with requests.Session() as download_session:
@@ -309,16 +328,39 @@ def _update_all_sync(run_daily=False):
             warnings.append('角色别名表下载失败：{}'.format(exc))
 
     daily_summaries = []
+    def cleanup_with_progress(account, label):
+        progress[label + '日常'] = '运行中'
+        before = len(warnings)
+        count = len(daily_summaries)
+        cleanup_account(account, label, daily_summaries, warnings)
+        if len(daily_summaries) == count:
+            progress[label + '日常'] = '失败'
+        elif len(warnings) > before:
+            progress[label + '日常'] = '完成（有警告）'
+        else:
+            progress[label + '日常'] = '正常'
+
     if run_daily:
-        cleanup_account(client, '大号', daily_summaries, warnings)
+        cleanup_with_progress(client, '大号')
+    progress['大号数据查询'] = '运行中'
     try:
         war = client.call('GuildWarHandler.QueryFullGuildWarData', {},
                           required_key='GuildWarData')
         our_guild, enemy_guild, members = collect_defences(war)
+        progress['大号数据查询'] = '正常'
+    except Exception as exc:
+        progress['大号数据查询'] = '失败：{}'.format(exc)
+        raise
     finally:
-        alt.login(attempts=3, force=True)
+        try:
+            alt.login(attempts=3, force=True)
+        except Exception as exc:
+            if run_daily:
+                progress['小号日常'] = '未执行（登录失败）'
+            progress['小号数据采集'] = '未执行（登录失败）'
+            raise
         if run_daily:
-            cleanup_account(alt, '小号', daily_summaries, warnings)
+            cleanup_with_progress(alt, '小号')
 
     result = {
         'our_guild': our_guild['name'],
@@ -333,6 +375,8 @@ def _update_all_sync(run_daily=False):
     }
 
     result['daily'] = '；'.join(daily_summaries)
+    progress['小号数据采集'] = '运行中'
+    warning_count = len(warnings)
     if members:
         result['enemy_guild'] = enemy_guild['name']
         result['members'] = len(members)
@@ -349,6 +393,8 @@ def _update_all_sync(run_daily=False):
                            ('parse_failures', '战斗解析')):
             if battle_result[key]:
                 warnings.append('{}失败 {} 条'.format(label, battle_result[key]))
+    progress['小号数据采集'] = (
+        '完成（有警告）' if len(warnings) > warning_count else '正常')
     return result
 
 
@@ -380,6 +426,24 @@ def daily_result_text(result):
 
 
 def update_result_text(result):
+    if 'progress' in result:
+        failed = result.get('error') or any(
+            status.startswith('失败') for status in result['progress'].values())
+        text = '团战任务结束（有失败）' if failed else '团战任务完成'
+        text += '\n' + '\n'.join(
+            '{}：{}'.format(name, status)
+            for name, status in result['progress'].items())
+        if result.get('error'):
+            text += '\n错误：' + result['error']
+        if not result.get('error'):
+            details = dict(result)
+            del details['progress']
+            details['daily'] = None
+            details['warnings'] = []
+            text += '\n' + update_result_text(details)
+        if result['warnings']:
+            text += '\n' + '\n'.join(result['warnings'])
+        return text
     parts = []
     if result['enemy_guild']:
         parts.append('当前对战 {} vs {}'.format(
