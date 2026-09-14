@@ -115,7 +115,7 @@ class DailyReport:
         pass
 
     def warn(self, message):
-        if len(self.warnings) < 8:
+        if message not in self.warnings and len(self.warnings) < 8:
             self.warnings.append(message)
 
     def fail(self, section, exc):
@@ -1025,8 +1025,6 @@ def finish_activity_opening(client, event, default_team, report, support=None):
             report_failure=index == 0,
         )
         if data is None:
-            if index == 0:
-                report.warn('活动开图首战失败，活动讨伐未继续')
             return last_scene_id
         last_scene_id = scene_id
     return last_scene_id
@@ -1074,11 +1072,13 @@ def run_activity(client, login_data, event, team, report):
     _, scene_id = highest_passed_scene(
         login_data, r'B{}_1_(\d+)'.format(re.escape(pickup)))
     support = activity_support(client, report)
+    opening_warning_count = len(report.warnings)
     if not scene_id:
         scene_id = finish_activity_opening(
             client, event, team, report, support)
     if not scene_id:
-        report.warn('活动讨伐未执行：没有可用活动关卡')
+        if len(report.warnings) == opening_warning_count:
+            report.warn('活动讨伐未执行：没有可用活动关卡')
         return
     run_urgent_missions(client, login_data, team, report, support)
     index = 0
@@ -1093,8 +1093,6 @@ def run_activity(client, login_data, event, team, report):
             report_failure=index == 0,
         )
         if data is None:
-            if index == 0:
-                report.warn('活动讨伐首战失败，讨伐未继续')
             return
         run_urgent_missions(client, data, team, report, support)
         index += 1
@@ -1125,9 +1123,6 @@ def run_hunts(client, login_data, team, report):
             report_failure=index == 0,
         )
         if data is None:
-            if index == 0:
-                report.warn('{}讨伐首战失败，讨伐未继续'.format(
-                    HUNT_NAMES[element]))
             return
         run_urgent_missions(client, data, team, report)
         index += 1
