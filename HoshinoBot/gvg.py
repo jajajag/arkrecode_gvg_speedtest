@@ -1,22 +1,9 @@
 import asyncio
 import random
 import re
-from pathlib import Path
 
-from .api import BASE_DIR, INFO_IMAGE_LOCK, cache_info_images
-from .database import IMAGES_DIR, init_database
-from .queries import (
-    format_defence,
-    format_member_history,
-    format_player,
-    format_solutions,
-    format_win_rates,
-    format_wrongbook,
-    resolve_member_info_target,
-    resolve_roles,
-    set_max_speed,
-    set_member_info,
-)
+from .database import init_database
+from .queries import format_defence, format_solutions, resolve_roles
 from .updater import (
     daily_result_text,
     run_daily_sync,
@@ -79,108 +66,32 @@ async def run_daily_job(service, bot=None, ev=None, notify_superuser=True):
 
 GVG_HELP = (
     '团战指令：\n'
-    '团战 作业 角色1 角色2 角色3\n'
-    '团战 胜率表\n'
-    '团战 错题本 团名 [场数，最多10场]\n'
-    '团战 一速 玩家名或UID 速度\n'
-    '团战 信息 玩家名或UID 内容或图片\n'
-    '团战 历史 玩家名或UID\n'
-    '团战 数据 玩家名或UID\n'
-    '团战 玩家名或UID\n'
+    '团战 [作业] 角色1 角色2 角色3\n'
+    '团战 [数据] 玩家名或UID\n'
     '团战 清日常（仅限Bot主）\n'
     '团战 更新数据（仅限Bot主）'
 )
 
-
-def _format_query_reply(message):
-    return str(message).lstrip('\r\n')
-
-
-def _message_parts(message):
-    for segment in message:
-        try:
-            kind = segment['type']
-            data = segment.get('data', {})
-        except (KeyError, TypeError, AttributeError):
-            continue
-        yield str(kind), dict(data)
+# Serialize queries, including snapshot reads, to bound concurrent memory.
+QUERY_LOCK = asyncio.Lock()
 
 
-def _has_images(message):
-    return any(kind == 'image' for kind, _ in _message_parts(message))
-
-
-def _extract_info_segments(message, remove_plain_chars):
-    remaining = int(remove_plain_chars)
-    segments = []
-    image_data = []
-    for kind, data in _message_parts(message):
-        if kind == 'text':
-            content = str(data.get('text') or '')
-            if remaining:
-                removed = min(remaining, len(content))
-                remaining -= removed
-                content = content[removed:]
-            if content:
-                if segments and segments[-1]['type'] == 'text':
-                    segments[-1]['content'] += content
-                else:
-                    segments.append({'type': 'text', 'content': content})
-        elif kind == 'image' and remaining == 0:
-            image_index = len(image_data)
-            image_data.append(data)
-            segments.append({'type': 'image', 'source_index': image_index})
-    if remaining:
-        raise ValueError('无法从原始消息中定位玩家信息内容')
-    while segments and segments[0]['type'] == 'text' \
-            and not segments[0]['content'].strip():
-        segments.pop(0)
-    return segments, image_data
-
-
-def _replace_image_sources(segments, image_paths):
-    result = []
-    for segment in segments:
-        if segment['type'] == 'image':
-            result.append({
-                'type': 'image',
-                'path': image_paths[segment['source_index']],
-            })
-        else:
-            result.append(segment)
-    return result
-
-
-def _store_member_info(player, source_segments, image_data):
-    with INFO_IMAGE_LOCK:
-        image_paths = cache_info_images(image_data, IMAGES_DIR)
-        info_segments = _replace_image_sources(
-            source_segments, image_paths)
-        return set_member_info(player, info_segments)
-
-
-def _render_player_segments(segments):
-    rendered = []
-    base_dir = BASE_DIR.resolve()
-    for segment in segments:
-        if segment['type'] == 'text':
-            rendered.append({
-                'type': 'text',
-                'data': {'text': segment['content']},
-            })
-            continue
-        image_path = (BASE_DIR / Path(segment['path'])).resolve()
-        try:
-            image_path.relative_to(base_dir)
-        except ValueError as exc:
-            raise ValueError('图片路径超出插件目录') from exc
-        if not image_path.is_file():
-            raise FileNotFoundError('图片文件不存在：{}'.format(image_path.name))
-        rendered.append({
-            'type': 'image',
-            'data': {'file': image_path.as_uri()},
-        })
-    return rendered
+def query_reply(raw):
+    if raw == '数据' or re.match(r'数据\s', raw):
+        query = raw[2:].strip()
+        return format_defence(query) if query else '格式：团战 数据 玩家名或UID'
+    explicit = raw.startswith('作业')
+    parts = (raw[2:].strip() if explicit else raw).split()
+    if explicit or len(parts) == 3:
+        if len(parts) != 3:
+            return '格式：团战 [作业] 角色1 角色2 角色3'
+        role_ids, error = resolve_roles(parts)
+        if not error:
+            return format_solutions(role_ids)
+        if explicit:
+            return error
+        # A player's full name may contain spaces.
+    return format_defence(raw)
 
 
 _REGISTERED = False
@@ -228,114 +139,10 @@ def register_gvg(service):
                 service, bot=bot, ev=ev, notify_superuser=False)
             return
 
-        if raw == '数据' or re.match(r'数据\s', raw):
-            query = raw[len('数据'):].strip()
-            try:
-                message = (await asyncio.to_thread(format_defence, query)
-                           if query else '格式：团战 数据 玩家名或CUID')
-            except Exception as exc:
-                message = '查询失败：{}'.format(exc)
-            await bot.send(ev, message, at_sender=False)
-            return
-
-        if raw == '胜率表':
-            try:
-                message = format_win_rates()
-            except Exception as exc:
-                message = '查询失败：{}'.format(exc)
-            await bot.send(ev, _format_query_reply(message), at_sender=False)
-            return
-
-        if raw == '错题本' or re.match(r'错题本\s', raw):
-            content = raw[len('错题本'):].strip()
-            match = re.fullmatch(r'(.+?)(?:\s+(\d+))?', content)
-            if not match:
-                message = '格式：团战 错题本 团名 [场数，最多10场]'
-            else:
-                try:
-                    message = format_wrongbook(
-                        match.group(1), match.group(2) or 1)
-                except Exception as exc:
-                    message = '查询失败：{}'.format(exc)
-            await bot.send(ev, _format_query_reply(message), at_sender=False)
-            return
-
-        if raw.startswith('作业'):
-            queries = raw[len('作业'):].strip().split()
-            if len(queries) != 3:
-                message = '格式：团战 作业 角色1 角色2 角色3'
-            else:
-                try:
-                    role_ids, error = resolve_roles(queries)
-                    message = error or format_solutions(role_ids)
-                except Exception as exc:
-                    message = '查询失败：{}'.format(exc)
-            await bot.send(ev, _format_query_reply(message), at_sender=False)
-            return
-
-        if raw.startswith('一速'):
-            content = raw[len('一速'):].strip()
-            match = re.fullmatch(
-                r'(.+?)\s+(\d{1,4}(?:-\d{1,4}|\+)?)', content)
-            if not match:
-                message = '格式：团战 一速 玩家名或UID 227（或265-270、122+）'
-            else:
-                try:
-                    message = set_max_speed(match.group(1), match.group(2))
-                except Exception as exc:
-                    message = '更新失败：{}'.format(exc)
-            await bot.send(ev, message, at_sender=False)
-            return
-
-        if raw == '历史' or re.match(r'历史\s', raw):
-            player_query = raw[len('历史'):].strip()
-            if not player_query:
-                message = '格式：团战 历史 玩家名或UID'
-            else:
-                try:
-                    message = format_member_history(player_query)
-                except Exception as exc:
-                    message = '查询失败：{}'.format(exc)
-            await bot.send(ev, _format_query_reply(message), at_sender=False)
-            return
-
-        if raw == '信息' or re.match(r'信息\s', raw):
-            try:
-                match = re.match(r'信息\s*', raw)
-                body_start = match.end()
-                body = raw[body_start:]
-                has_images = _has_images(ev.message)
-                player, payload_start, error = resolve_member_info_target(
-                    body, has_images=has_images)
-                if error:
-                    message = error
-                else:
-                    plain_message = ev.message.extract_plain_text()
-                    raw_start = plain_message.find(raw)
-                    if raw_start < 0:
-                        raise ValueError('无法定位团战信息指令')
-                    source_segments, image_data = _extract_info_segments(
-                        ev.message,
-                        raw_start + body_start + payload_start,
-                    )
-                    message = await asyncio.to_thread(
-                        _store_member_info,
-                        player,
-                        source_segments,
-                        image_data,
-                    )
-            except Exception as exc:
-                message = '更新失败：{}'.format(exc)
-            await bot.send(ev, message, at_sender=False)
-            return
-
         try:
-            message = format_player(raw)
-            if isinstance(message, list):
-                message = _render_player_segments(message)
+            async with QUERY_LOCK:
+                message = await asyncio.to_thread(query_reply, raw)
         except Exception as exc:
+            service.logger.exception(exc)
             message = '查询失败：{}'.format(exc)
-        if isinstance(message, list):
-            await bot.send(ev, message, at_sender=False)
-        else:
-            await bot.send(ev, _format_query_reply(message), at_sender=False)
+        await bot.send(ev, str(message).lstrip('\r\n'), at_sender=False)

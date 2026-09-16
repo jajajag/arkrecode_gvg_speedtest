@@ -65,25 +65,9 @@ git clone https://github.com/jajajag/arkrecode_gvg_speedtest
 pip install requests UnityPy
 ```
 
-4. 复制 `HoshinoBot/data/account_example.json` 为 `HoshinoBot/data/account.json`，在同一文件的 `MainAccount`、`SubAccount` 中分别填写大号、小号的 `Token` 等。
+~~4. 复制 `HoshinoBot/data/account_example.json` 为 `HoshinoBot/data/account.json`，在同一文件的 `MainAccount`、`SubAccount` 中分别填写大号、小号的 `Token` 等。~~
 
 5. 重启 HoshinoBot 后，发送 `团战测速` 或 `帮助团战测速` 查看用法。
-
-### 可用指令
-
-团战示例：
-
-```text
-团战 作业 角色1 角色2 角色3
-团战 胜率表
-团战 一速 玩家名或UID 速度
-团战 信息 玩家名或UID 内容或图片
-团战 历史 玩家名或UID
-团战 数据 玩家名或UID
-团战 玩家名或UID
-团战 清日常（仅限Bot主）
-团战 更新数据（仅限Bot主）
-```
 
 团战测速示例：
 

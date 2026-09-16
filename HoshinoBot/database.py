@@ -1,18 +1,17 @@
 import json
 import sqlite3
-import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .api import BASE_DIR, GameRequestError, INFO_IMAGE_LOCK
+from .api import BASE_DIR, GameRequestError
+from .schema import SCHEMA_SQL
 
 
 DATA_DIR = BASE_DIR / 'data'
 DATA_DB_PATH = DATA_DIR / 'data.db'
 MASTER_DB_PATH = DATA_DIR / 'master.db'
 ALIAS_PATH = DATA_DIR / 'character_dic.json'
-IMAGES_DIR = BASE_DIR / 'images'
 
 
 def today():
@@ -31,97 +30,10 @@ def connect_data(path=DATA_DB_PATH):
     return conn
 
 
-def clear_info_images(path=IMAGES_DIR):
-    path = Path(path)
-    if path.is_symlink():
-        raise RuntimeError('拒绝清理符号链接图片目录：{}'.format(path))
-    if path.exists():
-        shutil.rmtree(path)
-    path.mkdir(parents=True, exist_ok=True)
-
-
 def init_database(path=DATA_DB_PATH):
     conn = connect_data(path)
     try:
-        conn.executescript(
-            '''
-            CREATE TABLE IF NOT EXISTS gvg_snapshots (
-                cuid INTEGER NOT NULL,
-                kind TEXT NOT NULL,
-                snapshot_date TEXT NOT NULL,
-                payload TEXT NOT NULL,
-                PRIMARY KEY (cuid, kind, snapshot_date)
-            );
-            CREATE TABLE IF NOT EXISTS gvg_members (
-                cuid INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                avatar_role_id TEXT,
-                max_speed TEXT,
-                info TEXT,
-                info_date TEXT,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS gvg_current_members (
-                cuid INTEGER PRIMARY KEY,
-                snapshot_date TEXT NOT NULL,
-                sort_order INTEGER NOT NULL,
-                upper_1_role_id TEXT,
-                upper_2_role_id TEXT,
-                upper_3_role_id TEXT,
-                lower_1_role_id TEXT,
-                lower_2_role_id TEXT,
-                lower_3_role_id TEXT,
-                FOREIGN KEY (cuid) REFERENCES gvg_members(cuid)
-            );
-            CREATE TABLE IF NOT EXISTS gvg_member_info_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                cuid INTEGER NOT NULL,
-                player_name TEXT NOT NULL,
-                match_date TEXT,
-                enemy_guild_id TEXT,
-                enemy_guild_name TEXT,
-                info TEXT NOT NULL,
-                info_date TEXT,
-                archived_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS gvg_rounds (
-                battle_id TEXT NOT NULL,
-                round_idx INTEGER NOT NULL,
-                start_ts INTEGER NOT NULL,
-                atk_cuid INTEGER,
-                atk_name TEXT,
-                atk_guild TEXT,
-                def_cuid INTEGER,
-                def_name TEXT,
-                def_guild TEXT,
-                win INTEGER NOT NULL,
-                PRIMARY KEY (battle_id, round_idx)
-            );
-            CREATE TABLE IF NOT EXISTS gvg_units (
-                battle_id TEXT NOT NULL,
-                round_idx INTEGER NOT NULL,
-                side TEXT NOT NULL,
-                pos INTEGER NOT NULL,
-                role_id TEXT NOT NULL,
-                star INTEGER,
-                awaken INTEGER,
-                imprint INTEGER,
-                dead INTEGER NOT NULL,
-                PRIMARY KEY (battle_id, round_idx, side, pos)
-            );
-            CREATE TABLE IF NOT EXISTS plugin_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_gvg_rounds_recent
-                ON gvg_rounds(start_ts);
-            CREATE INDEX IF NOT EXISTS idx_gvg_rounds_defender
-                ON gvg_rounds(def_cuid, atk_guild, start_ts);
-            CREATE INDEX IF NOT EXISTS idx_gvg_units_role
-                ON gvg_units(side, role_id);
-            CREATE INDEX IF NOT EXISTS idx_gvg_info_history_player
-                ON gvg_member_info_history(cuid, archived_at DESC, id DESC);
-            ''')
+        conn.executescript(SCHEMA_SQL)
         _migrate_legacy_tables(conn)
         conn.commit()
     finally:
@@ -193,72 +105,8 @@ def update_our_guild_meta(guild_info, db_path=DATA_DB_PATH):
         conn.close()
 
 
-def replace_current_members(members, enemy_guild, db_path=DATA_DB_PATH,
-                            snapshot_date=None, images_dir=IMAGES_DIR):
-    with INFO_IMAGE_LOCK:
-        return _replace_current_members_locked(
-            members,
-            enemy_guild,
-            db_path=db_path,
-            snapshot_date=snapshot_date,
-            images_dir=images_dir,
-        )
-
-
-def _text_only_info(raw):
-    """Return encoded text segments, dropping images and invalid old data."""
-    try:
-        data = json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict) or data.get('format') != 'gvg_info_v1':
-        return None
-    source_segments = data.get('segments')
-    if not isinstance(source_segments, list):
-        return None
-    segments = []
-    for segment in source_segments:
-        if not isinstance(segment, dict) or segment.get('type') != 'text':
-            continue
-        content = str(segment.get('content') or '')
-        if content:
-            segments.append({'type': 'text', 'content': content})
-    if not segments:
-        return None
-    return json.dumps(
-        {'format': 'gvg_info_v1', 'segments': segments},
-        ensure_ascii=False,
-        separators=(',', ':'),
-    )
-
-
-def _archive_member_info(conn, match_date, enemy_guild_id,
-                         enemy_guild_name):
-    archived_at = now_ms()
-    for member in conn.execute(
-            'SELECT cuid, name, info, info_date FROM gvg_members '
-            'WHERE info IS NOT NULL'):
-        text_info = _text_only_info(member['info'])
-        if text_info is None:
-            continue
-        conn.execute(
-            '''
-            INSERT INTO gvg_member_info_history(
-                cuid, player_name, match_date,
-                enemy_guild_id, enemy_guild_name,
-                info, info_date, archived_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''',
-            (int(member['cuid']), str(member['name']), match_date,
-             enemy_guild_id, enemy_guild_name,
-             text_info, member['info_date'], archived_at),
-        )
-
-
-def _replace_current_members_locked(members, enemy_guild,
-                                    db_path=DATA_DB_PATH,
-                                    snapshot_date=None,
-                                    images_dir=IMAGES_DIR):
+def replace_current_members(members, enemy_guild,
+                            db_path=DATA_DB_PATH, snapshot_date=None):
     init_database(db_path)
     snapshot_date = snapshot_date or today()
     conn = connect_data(db_path)
@@ -266,26 +114,7 @@ def _replace_current_members_locked(members, enemy_guild,
         conn.execute('BEGIN IMMEDIATE')
         guild_id = str(enemy_guild.get('id') or '')
         guild_name = str(enemy_guild.get('name') or '')
-        previous_date = meta_get(conn, 'current_match_date') or ''
-        previous_guild_id = meta_get(conn, 'current_enemy_guild_id') or ''
-        previous_guild_name = meta_get(
-            conn, 'current_enemy_guild_name') or ''
-        same_enemy = (
-            bool(guild_id and previous_guild_id == guild_id)
-            or bool(guild_name and previous_guild_name == guild_name)
-        )
-        is_new_match = previous_date != snapshot_date or not same_enemy
         conn.execute('DELETE FROM gvg_current_members')
-        if is_new_match:
-            _archive_member_info(
-                conn,
-                previous_date,
-                previous_guild_id,
-                previous_guild_name,
-            )
-            conn.execute(
-                'UPDATE gvg_members SET info=NULL, info_date=NULL '
-                'WHERE info IS NOT NULL OR info_date IS NOT NULL')
         for member in members:
             upper = [role_id for _, role_id in sorted(
                 member.get('first') or [])]
@@ -325,8 +154,6 @@ def _replace_current_members_locked(members, enemy_guild,
         meta_set(conn, 'current_enemy_guild_name', guild_name)
         meta_set(conn, 'current_match_date', snapshot_date)
         conn.commit()
-        if is_new_match:
-            clear_info_images(images_dir)
     except Exception:
         conn.rollback()
         raise
