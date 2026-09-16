@@ -69,6 +69,8 @@ pip install requests UnityPy
 
 5. 重启 HoshinoBot 后，发送 `团战测速` 或 `帮助团战测速` 查看用法。
 
+### 可用指令
+
 团战测速示例：
 
 ```text
