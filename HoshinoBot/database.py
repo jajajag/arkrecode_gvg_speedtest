@@ -9,9 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
-    from ..Frida.helper import property_value
+    from ..Frida.helper import num
 except ImportError:
-    from Frida.helper import property_value
+    from Frida.helper import num
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / 'data'
@@ -266,9 +266,9 @@ def card_equipment(card, cuid, name):
             row = [str(identity), int(cuid), str(name), part,
                    equip.get('StaticID'), equip.get('Set'), equip.get('ClassLV'),
                    int(equip.get('LV') or 0), main.get('PropertyType'),
-                   property_value(main)]
+                   num(main.get('SValue'), None)]
             for prop in props:
-                row.extend((prop.get('PropertyType', ''), property_value(prop)))
+                row.extend((prop.get('PropertyType', ''), num(prop.get('Value'), None)))
             yield tuple(row)
 
 
@@ -333,7 +333,7 @@ def defence_unit_rows(teams, master_path=MASTER_DB_PATH):
                        bond.get('StaticID'), bond.get('LV'), levels, ','.join(sets)]
                 for part in ('Shoes', 'Ring', 'Necklace'):
                     prop = (equipment.get(part) or {}).get('MainProp') or {}
-                    row.extend((prop.get('PropertyType'), property_value(prop)))
+                    row.extend((prop.get('PropertyType'), num(prop.get('SValue'), None)))
                 row.append(round(panel['HP']))
                 rows.append(tuple(row))
     return rows
