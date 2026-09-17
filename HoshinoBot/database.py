@@ -1,18 +1,93 @@
+import hashlib
+import importlib
 import json
 import sqlite3
+import threading
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .api import BASE_DIR, GameRequestError
-from .schema import SCHEMA_SQL
-
-
+BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / 'data'
 DATA_DB_PATH = DATA_DIR / 'data.db'
 MASTER_DB_PATH = DATA_DIR / 'master.db'
 ALIAS_PATH = DATA_DIR / 'character_dic.json'
 
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS gvg_rounds (
+    battle_id TEXT NOT NULL,
+    round_idx INTEGER NOT NULL,
+    start_ts INTEGER NOT NULL,
+    atk_cuid INTEGER,
+    atk_name TEXT,
+    atk_guild TEXT,
+    def_cuid INTEGER,
+    def_name TEXT,
+    def_guild TEXT,
+    win INTEGER NOT NULL,
+    PRIMARY KEY (battle_id, round_idx)
+);
+CREATE TABLE IF NOT EXISTS gvg_units (
+    battle_id TEXT NOT NULL,
+    round_idx INTEGER NOT NULL,
+    side TEXT NOT NULL,
+    pos INTEGER NOT NULL,
+    role_id TEXT NOT NULL,
+    star INTEGER,
+    awaken INTEGER,
+    imprint INTEGER,
+    dead INTEGER NOT NULL,
+    PRIMARY KEY (battle_id, round_idx, side, pos)
+);
+CREATE TABLE IF NOT EXISTS plugin_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gvg_rounds_recent
+    ON gvg_rounds(start_ts);
+CREATE INDEX IF NOT EXISTS idx_gvg_rounds_defender
+    ON gvg_rounds(def_cuid, atk_guild, start_ts);
+CREATE INDEX IF NOT EXISTS idx_gvg_units_role
+    ON gvg_units(side, role_id);
+CREATE TABLE IF NOT EXISTS pvp_equips (
+    equip_id TEXT PRIMARY KEY,
+    cuid INTEGER, player_name TEXT,
+    equip_type TEXT, static_id TEXT, set_name TEXT,
+    class_lv INTEGER, lv INTEGER, main_prop TEXT, main_value REAL,
+    sub1_prop TEXT, sub1_value REAL, sub2_prop TEXT, sub2_value REAL,
+    sub3_prop TEXT, sub3_value REAL, sub4_prop TEXT, sub4_value REAL
+);
+CREATE TABLE IF NOT EXISTS gvg_defence (
+    id INTEGER PRIMARY KEY,
+    match_id TEXT NOT NULL,
+    match_date TEXT NOT NULL,
+    cuid INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    avatar_role_id TEXT,
+    UNIQUE (match_date, match_id, cuid)
+);
+CREATE TABLE IF NOT EXISTS gvg_defence_units (
+    defence_id INTEGER NOT NULL REFERENCES gvg_defence(id) ON DELETE CASCADE,
+    team INTEGER NOT NULL CHECK (team IN (1, 2)),
+    pos INTEGER NOT NULL,
+    role_id TEXT NOT NULL,
+    lv INTEGER,
+    star INTEGER,
+    awaken_lv INTEGER,
+    imprint_lv INTEGER,
+    is_self_imprint INTEGER,
+    artifact_id TEXT,
+    artifact_lv INTEGER,
+    skill_levels TEXT,
+    sets TEXT,
+    shoes_prop TEXT, shoes_value REAL,
+    ring_prop TEXT, ring_value REAL,
+    necklace_prop TEXT, necklace_value REAL,
+    hp INTEGER NOT NULL,
+    PRIMARY KEY (defence_id, team, pos)
+);
+"""
 
 def today():
     return datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -27,57 +102,26 @@ def connect_data(path=DATA_DB_PATH):
     conn = sqlite3.connect(str(path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA busy_timeout = 30000')
+    conn.execute('PRAGMA foreign_keys = ON')
     return conn
 
 
 def init_database(path=DATA_DB_PATH):
     conn = connect_data(path)
     try:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if tables & {'gvg_members', 'gvg_current_members', 'gvg_snapshots', 'gvg_defences', 'pvp_meta'}:
+            raise ValueError('检测到旧数据库，请先运行 migrate_gvg_db.py 并替换生成的新库')
+        if 'gvg_defence' in tables and 'team_data' in {
+                row[1] for row in conn.execute('PRAGMA table_info(gvg_defence)')}:
+            raise ValueError('检测到 JSON 防守表，请先运行 migrate_gvg_db.py')
+        if 'pvp_equips' in tables and 'observed_at' in {
+                row[1] for row in conn.execute('PRAGMA table_info(pvp_equips)')}:
+            raise ValueError('检测到旧版装备时间戳，请先运行 migrate_gvg_db.py')
         conn.executescript(SCHEMA_SQL)
-        _migrate_legacy_tables(conn)
         conn.commit()
     finally:
         conn.close()
-
-
-def _table_exists(conn, table):
-    return conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (table,),
-    ).fetchone() is not None
-
-
-def _migrate_legacy_tables(conn):
-    if _table_exists(conn, 'pvp_meta'):
-        conn.execute(
-            '''
-            INSERT OR IGNORE INTO plugin_meta(key, value)
-            SELECT key, value FROM pvp_meta
-            ''')
-    if _table_exists(conn, 'gvg_defences'):
-        migration_key = 'legacy_gvg_defences_migrated'
-        if meta_get(conn, migration_key):
-            return
-        has_current_members = conn.execute(
-            'SELECT 1 FROM gvg_current_members LIMIT 1'
-        ).fetchone() is not None
-        if has_current_members:
-            meta_set(conn, migration_key, 'skipped')
-            return
-        conn.execute(
-            '''
-            INSERT OR IGNORE INTO gvg_current_members(
-                cuid, snapshot_date, sort_order,
-                upper_1_role_id, upper_2_role_id, upper_3_role_id,
-                lower_1_role_id, lower_2_role_id, lower_3_role_id
-            )
-            SELECT
-                cuid, snapshot_date, sort_order,
-                upper_1_role_id, upper_2_role_id, upper_3_role_id,
-                lower_1_role_id, lower_2_role_id, lower_3_role_id
-            FROM gvg_defences
-            ''')
-        meta_set(conn, migration_key, 'done')
 
 
 def meta_get(conn, key):
@@ -94,71 +138,14 @@ def meta_set(conn, key, value):
     )
 
 
-def update_our_guild_meta(guild_info, db_path=DATA_DB_PATH):
-    init_database(db_path)
+def save_player_equipment(card, cuid, name, db_path=DATA_DB_PATH):
     conn = connect_data(db_path)
     try:
-        meta_set(conn, 'our_guild_id', guild_info.get('id') or '')
-        meta_set(conn, 'our_guild_name', guild_info.get('name') or '')
-        conn.commit()
+        with conn:
+            return save_equipment_rows(conn, card_equipment(card, cuid, name))
     finally:
         conn.close()
 
-
-def replace_current_members(members, enemy_guild,
-                            db_path=DATA_DB_PATH, snapshot_date=None):
-    init_database(db_path)
-    snapshot_date = snapshot_date or today()
-    conn = connect_data(db_path)
-    try:
-        conn.execute('BEGIN IMMEDIATE')
-        guild_id = str(enemy_guild.get('id') or '')
-        guild_name = str(enemy_guild.get('name') or '')
-        conn.execute('DELETE FROM gvg_current_members')
-        for member in members:
-            upper = [role_id for _, role_id in sorted(
-                member.get('first') or [])]
-            lower = [role_id for _, role_id in sorted(
-                member.get('second') or [])]
-            if (upper and len(upper) != 3) or (lower and len(lower) != 3):
-                raise GameRequestError(
-                    '{} 的防守阵容不是上下半各三人'.format(member['name']))
-            upper = (upper + [None, None, None])[:3]
-            lower = (lower + [None, None, None])[:3]
-            conn.execute(
-                '''
-                INSERT INTO gvg_members(
-                    cuid, name, avatar_role_id, updated_at
-                ) VALUES (?, ?, ?, ?)
-                ON CONFLICT(cuid) DO UPDATE SET
-                    name=excluded.name,
-                    avatar_role_id=excluded.avatar_role_id,
-                    updated_at=excluded.updated_at
-                ''',
-                (member['cuid'], member['name'],
-                 member['avatar_role_id'], now_ms()),
-            )
-            conn.execute(
-                '''
-                INSERT OR REPLACE INTO gvg_current_members(
-                    cuid, snapshot_date, sort_order,
-                    upper_1_role_id, upper_2_role_id, upper_3_role_id,
-                    lower_1_role_id, lower_2_role_id, lower_3_role_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (member['cuid'], snapshot_date, member['order'],
-                 upper[0], upper[1], upper[2],
-                 lower[0], lower[1], lower[2]),
-            )
-        meta_set(conn, 'current_enemy_guild_id', guild_id)
-        meta_set(conn, 'current_enemy_guild_name', guild_name)
-        meta_set(conn, 'current_match_date', snapshot_date)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
 
 def save_battle_rows(rows, db_path=DATA_DB_PATH, conn=None):
     if not rows:
@@ -239,11 +226,141 @@ def existing_battle_ids(battle_ids, db_path=DATA_DB_PATH, conn=None):
             conn.close()
 
 
-def save_snapshot(cuid, kind, payload, db_path=DATA_DB_PATH):
+EQUIP_COLUMNS = (
+    'equip_id', 'cuid', 'player_name', 'equip_type', 'static_id', 'set_name',
+    'class_lv', 'lv', 'main_prop', 'main_value',
+    'sub1_prop', 'sub1_value', 'sub2_prop', 'sub2_value',
+    'sub3_prop', 'sub3_value', 'sub4_prop', 'sub4_value',
+)
+EQUIP_UPSERT = (
+    'INSERT INTO pvp_equips (' + ','.join(EQUIP_COLUMNS) + ') VALUES ('
+    + ','.join('?' for _ in EQUIP_COLUMNS) + ') ON CONFLICT(equip_id) DO UPDATE SET '
+    + ','.join(f'{key}=excluded.{key}' for key in EQUIP_COLUMNS if key != 'equip_id')
+    + ' WHERE COALESCE(excluded.lv,0) > COALESCE(pvp_equips.lv,0)'
+)
+
+
+def card_equipment(card, cuid, name):
+    pvp = ((card.get('PVPInfo') or {}).get('DefenceTeam') or {}).get('PositionRoleMap') or {}
+    roles = list(pvp.values())
+    roles.extend(item.get('Role') or {} for item in
+                 (card.get('BattleSupportData') or {}).get('RoleDataList') or [])
+    for role in roles:
+        for part, equip in (role.get('EquipmentMap') or {}).items():
+            identity = equip.get('_id')
+            if isinstance(identity, dict):
+                identity = identity.get('$oid') or identity.get('$id')
+            if not identity:
+                # Older snapshots can lack IDs; keep them with stable player-scoped keys.
+                digest = hashlib.sha256(json.dumps(equip, sort_keys=True).encode()).hexdigest()
+                identity = f'legacy:{cuid}:{part}:{digest}'
+            main = equip.get('MainProp') or {}
+            props = ((equip.get('SubProps') or {}).get('SourceValues') or [])
+            if len(props) > 4:
+                raise ValueError('装备副属性超过四条，拒绝截断保存')
+            props = props + [{}] * (4 - len(props))
+            row = [str(identity), int(cuid), str(name), part,
+                   equip.get('StaticID'), equip.get('Set'), equip.get('ClassLV'),
+                   int(equip.get('LV') or 0), main.get('PropertyType'),
+                   main.get('Value', main.get('SValue', 0))]
+            for prop in props:
+                row.extend((prop.get('PropertyType', ''), prop.get('Value', prop.get('SValue', 0))))
+            yield tuple(row)
+
+
+def save_equipment_rows(conn, rows):
+    before = conn.total_changes
+    conn.executemany(EQUIP_UPSERT, rows)
+    return conn.total_changes - before
+
+
+_STATS_LOCK = threading.Lock()
+_MASTER_SIGNATURE = None
+
+
+def _stats_source(master_path):
+    global _MASTER_SIGNATURE
+    prefix = __package__.rsplit('.', 1)[0] + '.' if '.' in __package__ else ''
+    helper = importlib.import_module(prefix + 'Frida.helper')
+    path = Path(master_path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f'计算防守生命需要 master.db：{path}；迁移时可用 --master-db 指定')
+    stat = path.stat()
+    signature = (str(path), stat.st_mtime_ns, stat.st_size)
+    if _MASTER_SIGNATURE != signature or helper.MASTER is None or helper.MASTER.path.resolve() != path:
+        helper.MASTER = None
+        _MASTER_SIGNATURE = None
+        helper.load_master_data(path)
+        _MASTER_SIGNATURE = signature
+    return helper
+
+
+def defence_unit_rows(teams, master_path=MASTER_DB_PATH):
+    """Calculate HP before discarding raw data; preserve response skill order."""
+    rows = []
+    with _STATS_LOCK:
+        helper = _stats_source(master_path)
+        master = helper.MASTER
+        for team, key in ((1, 'FirstTeam'), (2, 'SecondTeam')):
+            entries = sorted(((teams.get(key) or {}).get('PositionRoleMap') or {}).items(),
+                             key=lambda item: int(item[0]))
+            if len(entries) > 3:
+                raise ValueError('每半场防守角色不能超过三人')
+            stats = helper.calculate_team_stats([role for _, role in entries])
+            for (pos, role), panel in zip(entries, stats):
+                equipment = role.get('EquipmentMap') or {}
+                counts = Counter((equipment.get(part) or {}).get('Set') for part in
+                                 ('Weapon', 'Head', 'Body', 'Shoes', 'Ring', 'Necklace'))
+                sets = []
+                for set_id, count in counts.most_common():
+                    if not set_id:
+                        continue
+                    need = max(int((master.equipment_sets.get(set_id) or {}).get('Count') or 99), 1)
+                    active = count // need
+                    if active:
+                        sets.append(f'{active if active > 1 else ""}{master.equipment_set_name(set_id)}')
+                bond = role.get('ArtifactData') or {}
+                skills = (role.get('Skills') or {}).get('Skills') or []
+                levels = ','.join(str(int(skill['Level']) - 1) if skill.get('Level') is not None else '?'
+                                  for skill in skills)
+                row = [team, int(pos), role['StaticID'], role.get('LV', role.get('Level')),
+                       role.get('Star'), role.get('AwakenLV'), role.get('ImprintLV'),
+                       int(role['IsSelfImprint']) if 'IsSelfImprint' in role else None,
+                       bond.get('StaticID'), bond.get('LV'), levels, ''.join(sets)]
+                for part in ('Shoes', 'Ring', 'Necklace'):
+                    prop = (equipment.get(part) or {}).get('MainProp') or {}
+                    row.extend((prop.get('PropertyType'), prop.get('Value', prop.get('SValue'))))
+                row.append(round(panel['HP']))
+                rows.append(tuple(row))
+    return rows
+
+
+def insert_defence(conn, match_id, match_date, cuid, name, avatar, teams, master_path=MASTER_DB_PATH):
+    units = defence_unit_rows(teams, master_path)
+    cursor = conn.execute('INSERT INTO gvg_defence(match_id,match_date,cuid,name,avatar_role_id) '
+                          'VALUES (?,?,?,?,?)', (match_id, match_date, int(cuid), name, avatar))
+    defence_id = cursor.lastrowid
+    conn.executemany('INSERT INTO gvg_defence_units VALUES (' + ','.join('?' for _ in range(20)) + ')',
+                     ((defence_id, *row) for row in units))
+    return defence_id
+
+
+def save_defence_match(players, enemy, db_path=DATA_DB_PATH, match_date=None):
+    if not players:
+        return
+    match_date = match_date or today()
+    match_id = match_date + ':' + str(enemy.get('id') or enemy.get('name') or 'unknown')
     conn = connect_data(db_path)
     try:
         with conn:
-            conn.execute('INSERT OR REPLACE INTO gvg_snapshots VALUES (?, ?, ?, ?)',
-                         (int(cuid), kind, today(), json.dumps(payload, ensure_ascii=False)))
+            conn.execute('DELETE FROM gvg_defence WHERE match_date=? AND match_id=?', (match_date, match_id))
+            for player in players:
+                info = player['PlayerInfo']
+                insert_defence(conn, match_id, match_date, info['CUID'], str(info.get('Name') or info['CUID']),
+                               str(info.get('LeaderSID') or ''), player['DefenceTeamData'])
+            meta_set(conn, 'match:' + match_id, json.dumps({
+                'date': match_date, 'enemy_guild_id': str(enemy.get('id') or ''),
+                'enemy_guild_name': str(enemy.get('name') or ''),
+            }, ensure_ascii=False, separators=(',', ':')))
     finally:
         conn.close()

@@ -1,57 +1,131 @@
-"""Create a compact core database from an old data.db, preserving a full backup.
-
-Only Python's standard library is required. The source is never modified.
-"""
-
+"""Offline, standard-library-only migration to the six-table database."""
 import argparse
 from contextlib import closing
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import sqlite3
-import sys
 import uuid
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from HoshinoBot.schema import SCHEMA_SQL
-
-
-CORE_TABLES = (
-    'gvg_members', 'gvg_current_members', 'gvg_snapshots',
-    'gvg_rounds', 'gvg_units', 'plugin_meta',
+from HoshinoBot.database import (
+    SCHEMA_SQL, MASTER_DB_PATH, EQUIP_COLUMNS, card_equipment,
+    save_equipment_rows, insert_defence,
 )
 
-
-def quote(name):
-    return '"' + name.replace('"', '""') + '"'
+CORE_TABLES = ('plugin_meta', 'gvg_rounds', 'gvg_units', 'pvp_equips', 'gvg_defence', 'gvg_defence_units')
 
 
 def readonly_uri(path):
-    return path.resolve().as_uri() + '?mode=ro'
+    return Path(path).resolve().as_uri() + '?mode=ro'
+
+
+def tables(conn, schema='legacy'):
+    return {r[0] for r in conn.execute(f"SELECT name FROM {schema}.sqlite_master WHERE type='table'")}
+
+
+def columns(conn, table, schema='main'):
+    return [r[1] for r in conn.execute(f'PRAGMA {schema}.table_info({table})')]
 
 
 def check_integrity(conn):
-    for row in conn.execute('PRAGMA integrity_check'):
+    for row in conn.execute('PRAGMA main.integrity_check'):
         if row[0] != 'ok':
             raise ValueError('数据库完整性检查失败：' + str(row[0]))
 
 
-def migrate(source, output, backup=None):
+def put_meta(conn, key, value):
+    conn.execute('INSERT OR REPLACE INTO main.plugin_meta VALUES (?,?)', (key, value))
+
+
+def match_meta(conn, date, guild_id='', guild_name=''):
+    match_id = date + ':' + str(guild_id or guild_name or 'unknown')
+    put_meta(conn, 'match:' + match_id, json.dumps({
+        'date': date, 'enemy_guild_id': str(guild_id), 'enemy_guild_name': str(guild_name),
+    }, ensure_ascii=False, separators=(',', ':')))
+    return match_id
+
+
+def copy_exact(conn, table):
+    fields = ','.join(columns(conn, table))
+    source_fields = fields
+    if table == 'gvg_defence_units' and 'team' not in columns(conn, table, 'legacy'):
+        source_fields = ','.join('half' if field == 'team' else field
+                                 for field in columns(conn, table))
+    conn.execute(f'INSERT INTO main.{table} ({fields}) SELECT {source_fields} FROM legacy.{table}')
+    before = conn.execute(f'SELECT COUNT(*) FROM legacy.{table}').fetchone()[0]
+    after = conn.execute(f'SELECT COUNT(*) FROM main.{table}').fetchone()[0]
+    if before != after:
+        raise ValueError(table + ' 行数校验失败')
+
+
+def import_equips(conn, schema):
+    if 'pvp_equips' not in tables(conn, schema):
+        return 0
+    source_columns = set(columns(conn, 'pvp_equips', schema))
+    missing = set(EQUIP_COLUMNS) - source_columns
+    if missing:
+        raise ValueError('旧 pvp_equips 缺少字段：' + ','.join(sorted(missing)))
+    fields = ','.join(EQUIP_COLUMNS)
+    count = 0
+    for row in conn.execute(f'SELECT {fields} FROM {schema}.pvp_equips'):
+        if not row['equip_id'] or row['cuid'] is None:
+            raise ValueError('旧 pvp_equips 存在无装备 ID 或无 UID 的记录，拒绝丢弃')
+        save_equipment_rows(conn, [tuple(row)])
+        count += 1
+    if conn.execute(f'SELECT equip_id FROM {schema}.pvp_equips EXCEPT '
+                    'SELECT equip_id FROM main.pvp_equips LIMIT 1').fetchone():
+        raise ValueError('旧装备 ID 校验失败')
+    return count
+
+
+def import_snapshots(conn, old_tables, old_meta, master_path):
+    counts = {'defence': 0, 'equipment': 0}
+    if 'gvg_snapshots' not in old_tables:
+        return counts
+    has_members = 'gvg_members' in old_tables
+    for row in conn.execute('SELECT * FROM legacy.gvg_snapshots ORDER BY snapshot_date DESC'):
+        if row['kind'] not in counts:
+            raise ValueError('未知快照类型：' + row['kind'])
+        payload = json.loads(row['payload'])
+        cuid, date = int(row['cuid']), row['snapshot_date']
+        info = payload.get('PlayerInfo') or (payload.get('BattleSupportData') or {}).get('PlayerInfo') or {}
+        member = conn.execute('SELECT name, avatar_role_id FROM legacy.gvg_members WHERE cuid=?',
+                              (cuid,)).fetchone() if has_members else None
+        name = str(info.get('Name') or (member['name'] if member else cuid))
+        if row['kind'] == 'equipment':
+            save_equipment_rows(conn, card_equipment(payload, cuid, name))
+        else:
+            team = payload.get('DefenceTeamData')
+            if not isinstance(team, dict):
+                raise ValueError(f'{date} UID {cuid} 的防守快照缺少 DefenceTeamData')
+            guild = info.get('GuildSubInfo') or {}
+            guild_id = guild.get('_id') or ''
+            if isinstance(guild_id, dict):
+                guild_id = guild_id.get('$oid') or ''
+            guild_name = guild.get('Name') or ''
+            if date == old_meta.get('current_match_date'):
+                guild_id = old_meta.get('current_enemy_guild_id') or guild_id
+                guild_name = old_meta.get('current_enemy_guild_name') or guild_name
+            match_id = match_meta(conn, date, guild_id, guild_name)
+            avatar = str(info.get('LeaderSID') or (member['avatar_role_id'] if member else '') or '')
+            insert_defence(conn, match_id, date, cuid, name, avatar, team, master_path)
+        counts[row['kind']] += 1
+    return counts
+
+
+def migrate(source, output, backup=None, equipment_source=None, master_path=MASTER_DB_PATH):
     source, output = Path(source).resolve(), Path(output).resolve()
     if not source.is_file():
         raise ValueError('源数据库不存在：' + str(source))
-    if backup is None:
-        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-        backup = source.with_name(source.name + '.backup-' + stamp + '-' + uuid.uuid4().hex[:8])
-    backup = Path(backup).resolve()
-    if len({source, output, backup}) != 3:
-        raise ValueError('源数据库、输出和备份必须使用不同路径')
-    if output.exists() or backup.exists():
-        raise ValueError('输出或备份文件已存在，拒绝覆盖')
-    if not output.parent.is_dir() or not backup.parent.is_dir():
-        raise ValueError('输出和备份目录必须已存在')
-
-    # SQLite's backup API includes committed WAL data in a consistent snapshot.
-    # Exclusively reserve the name to avoid overwriting existing files.
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    backup = Path(backup).resolve() if backup else source.with_name(
+        source.name + '.backup-' + stamp + '-' + uuid.uuid4().hex[:8])
+    if len({source, output, backup}) != 3 or output.exists() or backup.exists():
+        raise ValueError('源、输出、备份必须不同，且输出及备份不能已存在')
+    if equipment_source:
+        equipment_source = Path(equipment_source).resolve()
+        if not equipment_source.is_file() or equipment_source in {output, backup}:
+            raise ValueError('装备补充来源必须是已存在的独立数据库')
     with backup.open('xb'):
         pass
     with closing(sqlite3.connect(readonly_uri(source), uri=True)) as old, \
@@ -59,98 +133,100 @@ def migrate(source, output, backup=None):
         old.backup(saved, pages=256)
         check_integrity(saved)
     print('完整旧库备份：' + str(backup), flush=True)
-
     with output.open('xb'):
         pass
+    notices = []
     try:
         with closing(sqlite3.connect(output, uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute('PRAGMA foreign_keys=ON')
             conn.execute('PRAGMA cache_size=-2048')
             conn.execute('PRAGMA temp_store=FILE')
             conn.executescript(SCHEMA_SQL)
             conn.execute('ATTACH DATABASE ? AS legacy', (readonly_uri(backup),))
-            old_tables = {row[0] for row in conn.execute(
-                "SELECT name FROM legacy.sqlite_master WHERE type='table'")}
-            counts = {}
+            old_tables = tables(conn)
+            if not {'gvg_rounds', 'gvg_units'} <= old_tables:
+                raise ValueError('源库缺少 gvg_rounds 或 gvg_units，请使用团战 data.db')
             with conn:
-                for table in CORE_TABLES:
-                    origin = table
-                    if table == 'gvg_current_members' and table not in old_tables:
-                        origin = 'gvg_defences'
-                    if table == 'plugin_meta' and table not in old_tables:
-                        origin = 'pvp_meta'
-                    if origin not in old_tables:
-                        if table in ('gvg_current_members', 'plugin_meta'):
-                            counts[table] = 0
-                            continue
-                        raise ValueError('源库缺少核心表：' + table)
-                    columns = [row[1] for row in conn.execute(
-                        'PRAGMA main.table_info(' + quote(table) + ')')]
-                    old_columns = {row[1] for row in conn.execute(
-                        'PRAGMA legacy.table_info(' + quote(origin) + ')')}
-                    missing = set(columns) - old_columns
-                    if missing:
-                        raise ValueError(origin + ' 缺少字段：' + ', '.join(sorted(missing)))
-                    fields = ', '.join(map(quote, columns))
-                    conn.execute(f'INSERT INTO main.{quote(table)} ({fields}) '
-                                 f'SELECT {fields} FROM legacy.{quote(origin)}')
-                    counts[table] = conn.execute(
-                        f'SELECT COUNT(*) FROM main.{quote(table)}').fetchone()[0]
-                    # Compare every retained value, entirely within SQLite.
-                    for left, right in ((f'main.{quote(table)}', f'legacy.{quote(origin)}'),
-                                        (f'legacy.{quote(origin)}', f'main.{quote(table)}')):
-                        if conn.execute(f'SELECT {fields} FROM {left} EXCEPT '
-                                        f'SELECT {fields} FROM {right} LIMIT 1').fetchone():
-                            raise ValueError(table + ' 数据校验失败')
-                    old_count = conn.execute(
-                        f'SELECT COUNT(*) FROM legacy.{quote(origin)}').fetchone()[0]
-                    if counts[table] != old_count:
-                        raise ValueError(table + ' 行数校验失败')
-                # Match the live plugin's older metadata migration behavior.
-                if 'pvp_meta' in old_tables:
-                    conn.execute('INSERT OR IGNORE INTO main.plugin_meta(key,value) '
-                                 'SELECT key,value FROM legacy.pvp_meta')
-                if 'gvg_defences' in old_tables:
-                    marker = conn.execute("SELECT value FROM plugin_meta WHERE key='legacy_gvg_defences_migrated'").fetchone()
-                    if not marker:
-                        if not counts['gvg_current_members']:
-                            cols = ','.join(quote(row[1]) for row in conn.execute(
-                                'PRAGMA main.table_info(gvg_current_members)'))
-                            conn.execute(f'INSERT INTO main.gvg_current_members({cols}) '
-                                         f'SELECT {cols} FROM legacy.gvg_defences')
-                        conn.execute("INSERT INTO plugin_meta VALUES ('legacy_gvg_defences_migrated', 'done')")
-                for table in CORE_TABLES:
-                    counts[table] = conn.execute(f'SELECT COUNT(*) FROM {quote(table)}').fetchone()[0]
+                for table in ('gvg_rounds', 'gvg_units'):
+                    copy_exact(conn, table)
+                old_meta = {}
+                for table in ('pvp_meta', 'plugin_meta'):
+                    if table in old_tables:
+                        old_meta.update((r['key'], r['value']) for r in conn.execute(
+                            f'SELECT key,value FROM legacy.{table}'))
+                if 'master_catalog' in old_meta:
+                    put_meta(conn, 'master_catalog', old_meta['master_catalog'])
+                for key, value in old_meta.items():
+                    if key.startswith('match:'):
+                        data = json.loads(value)
+                        put_meta(conn, key, json.dumps({field: data[field] for field in
+                                 ('date', 'enemy_guild_id', 'enemy_guild_name') if field in data},
+                                 ensure_ascii=False, separators=(',', ':')))
+                if old_meta.get('current_match_date') and (
+                        old_meta.get('current_enemy_guild_id') or old_meta.get('current_enemy_guild_name')):
+                    match_meta(conn, old_meta['current_match_date'],
+                               old_meta.get('current_enemy_guild_id', ''), old_meta.get('current_enemy_guild_name', ''))
+                imported = import_equips(conn, 'legacy')
+                if equipment_source:
+                    conn.execute('ATTACH DATABASE ? AS equipment_old', (readonly_uri(equipment_source),))
+                    if 'pvp_equips' not in tables(conn, 'equipment_old'):
+                        raise ValueError('装备补充库不存在 pvp_equips')
+                    imported += import_equips(conn, 'equipment_old')
+                if 'gvg_defence' in old_tables:
+                    if 'team_data' in columns(conn, 'gvg_defence', 'legacy'):
+                        for row in conn.execute('SELECT * FROM legacy.gvg_defence'):
+                            insert_defence(conn, row['match_id'], row['match_date'], row['cuid'],
+                                           row['name'], row['avatar_role_id'], json.loads(row['team_data']), master_path)
+                    else:
+                        copy_exact(conn, 'gvg_defence')
+                        copy_exact(conn, 'gvg_defence_units')
+                snapshot_counts = import_snapshots(conn, old_tables, old_meta, master_path)
+                if not imported:
+                    notices.append('未导入旧 pvp_equips 记录；如此前迁移丢掉过此表，请用 --equipment-source 指定完整旧备份。')
+                if not conn.execute('SELECT 1 FROM main.gvg_defence LIMIT 1').fetchone():
+                    notices.append('原库没有可恢复的完整防守快照，待下次开战采集；不会用角色 ID 伪造装备情报。')
+            conn.execute('DETACH DATABASE legacy')
+            if equipment_source:
+                conn.execute('DETACH DATABASE equipment_old')
+            conn.execute('VACUUM')
             check_integrity(conn)
             if conn.execute('PRAGMA foreign_key_check').fetchone():
-                raise ValueError('外键校验失败，原库可能存在缺失的玩家记录')
-            # Core indexes are built by SCHEMA_SQL; optimize the query planner.
-            conn.execute('ANALYZE main')
-            conn.commit()
-        return {'source': str(source), 'output': str(output), 'backup': str(backup),
-                'counts': counts, 'excluded_tables': sorted(old_tables - set(CORE_TABLES) - {'sqlite_sequence'})}
+                raise ValueError('防守主表与角色明细的关联校验失败')
+            counts = {table: conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
+                      for table in CORE_TABLES}
+            indexes = [r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL")]
+        return {'output': str(output), 'backup': str(backup), 'counts': counts,
+                'equipment_imported': imported, 'snapshots_converted': snapshot_counts,
+                'indexes': indexes, 'notices': notices}
     except BaseException:
-        # Only remove the new file exclusively created by this invocation.
         output.unlink(missing_ok=True)
         raise
 
 
 def main():
-    parser = argparse.ArgumentParser(description='备份旧团战数据库并生成精简新版；不修改源库。')
-    parser.add_argument('source', type=Path, help='旧 data.db 路径（不是 master.db）')
-    parser.add_argument('--output', type=Path, help='新库路径，默认同目录 data.core.db')
-    parser.add_argument('--backup', type=Path, help='完整备份路径，默认自动生成唯一名称')
+    parser = argparse.ArgumentParser(description='备份旧库并生成六张业务表的新库，不修改原库。')
+    parser.add_argument('source', type=Path, help='团战 data.db（或完整旧备份）')
+    parser.add_argument('--output', type=Path, help='默认同目录 data.clean.db')
+    parser.add_argument('--master-db', type=Path, help='迁移旧防守时用于计算生命，默认源库同目录 master.db')
+    parser.add_argument('--backup', type=Path, help='完整备份路径，默认自动生成')
+    parser.add_argument('--equipment-source', type=Path, help='可选：从先前完整备份补回 pvp_equips')
     args = parser.parse_args()
-    output = args.output or args.source.with_name(args.source.stem + '.core.db')
     try:
-        result = migrate(args.source, output, args.backup)
-    except (OSError, sqlite3.Error, ValueError) as exc:
-        parser.exit(1, '迁移失败：' + str(exc) + '\n源数据库未修改；已生成的备份保留。\n')
+        result = migrate(args.source, args.output or args.source.with_name('data.clean.db'),
+                         args.backup, args.equipment_source, args.master_db or args.source.parent / 'master.db')
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as exc:
+        parser.exit(1, f'迁移失败：{exc}\n原库未修改，已生成的备份保留。\n')
     for table, count in result['counts'].items():
         print(f'{table}: {count} 行')
-    print('仅保留在完整备份中的旧表：' + ('、'.join(result['excluded_tables']) or '无'))
+    print('导入旧装备记录：', result['equipment_imported'])
+    print('转换旧快照：', result['snapshots_converted'])
+    print('额外索引：', '、'.join(result['indexes']))
+    for notice in result['notices']:
+        print('提示：' + notice)
     print('校验通过，新数据库：' + result['output'])
-    print('旧情报字段不进入新库，所有日期的战斗和快照均保留。')
-    print('请停止机器人后替换数据库；若迁移时机器人仍在写入，请停机后重新迁移。')
+    print('停机后替换 data.db；迁移期间若仍有写入，需停机后重新迁移。')
 
 
 if __name__ == '__main__':

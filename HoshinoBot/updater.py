@@ -13,6 +13,7 @@ from .api import (
     query_battle_detail,
     query_member_logs,
     query_top_guilds,
+    query_pvp_ranks,
 )
 from .database import (
     ALIAS_PATH,
@@ -24,9 +25,8 @@ from .database import (
     meta_get,
     meta_set,
     save_battle_rows,
-    save_snapshot,
-    replace_current_members,
-    update_our_guild_meta,
+    save_defence_match,
+    save_player_equipment,
 )
 from .daily import run_daily_cleanup
 from .master import update_master_db
@@ -50,31 +50,26 @@ def collect_defences(data, db_path=DATA_DB_PATH):
     our = guild(war.get('MyCampData'))
     if not our['name']:
         raise GameRequestError('团战响应缺少我方公会信息')
-    update_our_guild_meta(our, db_path)
     camp = war.get('EnemyCampData') or {}
     enemy = guild(camp)
     players = camp.get('PlayerInfoList') or []
     if not isinstance(players, list):
         raise GameRequestError('敌方防守列表格式异常')
     members = []
-    for index, player in enumerate(players, 1):
+    for player in players:
         info = player.get('PlayerInfo') or {}
         defence = player.get('DefenceTeamData')
         if info.get('CUID') is None or not isinstance(defence, dict):
             raise GameRequestError('敌方成员缺少 CUID 或防守数据')
-        member = dict(cuid=int(info['CUID']), name=str(info.get('Name') or info['CUID']),
-                      avatar_role_id=str(info.get('LeaderSID') or ''), order=index)
-        for field, key in (('first', 'FirstTeam'), ('second', 'SecondTeam')):
+        member = dict(cuid=int(info['CUID']), name=str(info.get('Name') or info['CUID']))
+        for key in ('FirstTeam', 'SecondTeam'):
             roles = team_roles(defence.get(key) or {})
             if len(roles) != 3:
                 raise GameRequestError('敌方防守阵容不完整，暂不更新当前名单')
-            member[field] = [(pos, role['StaticID']) for pos, role in enumerate(roles)]
         members.append(member)
     if members and not enemy['name']:
         raise GameRequestError('敌方防守存在但缺少公会信息')
-    replace_current_members(members, enemy, db_path)
-    for member, player in zip(members, players):
-        save_snapshot(member['cuid'], 'defence', player, db_path)
+    save_defence_match(players, enemy, db_path)
     return our, enemy, members
 
 
@@ -86,12 +81,23 @@ def collect_equipment(client, members, db_path=DATA_DB_PATH):
                                {'CUID': member['cuid']}, required_key='BattleSupportData')
             if not isinstance(card.get('PVPInfo'), dict):
                 raise GameRequestError('玩家卡缺少竞技场防守数据')
-            save_snapshot(member['cuid'], 'equipment', card, db_path)
+            save_player_equipment(card, member['cuid'], member['name'], db_path)
             saved += 1
         except Exception as exc:
             failures.append('装备采集 {}（{}）失败：{}'.format(
                 member['name'], member['cuid'], exc))
     return saved, failures
+
+
+def collect_rank_equipment(client, db_path=DATA_DB_PATH):
+    rows = query_pvp_ranks(client)
+    saved = 0
+    for item in rows[:100]:
+        info = item.get('PlayerInfo') or {}
+        if info.get('CUID') is None or not isinstance(item.get('PVPInfo'), dict):
+            raise GameRequestError('竞技场排名缺少玩家或防守数据')
+        saved += save_player_equipment(item, info['CUID'], info.get('Name') or str(info['CUID']), db_path)
+    return saved
 
 
 def guild_members(guild_data):
@@ -379,6 +385,10 @@ def _update_all_with_progress(run_daily, progress, warnings):
                            ('parse_failures', '战斗解析')):
             if battle_result[key]:
                 collection_warnings.append('{}失败 {} 条'.format(label, battle_result[key]))
+    try:
+        collect_rank_equipment(alt)
+    except Exception as exc:
+        collection_warnings.append('竞技场装备采集失败：{}'.format(exc))
     progress['小号数据采集'] = (
         '；'.join(collection_warnings) or '正常')
     return result

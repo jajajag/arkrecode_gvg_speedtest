@@ -1,16 +1,12 @@
 import itertools
 import json
 import sqlite3
-import threading
-from collections import Counter
 from pathlib import Path
 
-from .api import oid, team_roles
 from .database import ALIAS_PATH, DATA_DB_PATH, MASTER_DB_PATH, connect_data, now_ms
 
 RECENT_DAYS = 30
 MILLIS_PER_DAY = 86400000
-STATS_LOCK = threading.Lock()
 SPEED_PARTS = ("Weapon", "Head", "Body", "Necklace", "Ring")
 SPEED_SET_BASE = 189
 BROKEN_SET_BASE = 169
@@ -104,31 +100,6 @@ def _ambiguous_players(rows):
     return '\n'.join(lines)
 
 
-def equipment_pool(cards):
-    """Keep the latest observation of each item across newest-first snapshots."""
-    pool, seen = [], set()
-    for card in cards:
-        roles = team_roles((card.get('PVPInfo') or {}).get('DefenceTeam') or {})
-        roles += [item.get('Role') or {} for item in
-                  (card.get('BattleSupportData') or {}).get('RoleDataList') or []]
-        for role in roles:
-            for part, equip in (role.get('EquipmentMap') or {}).items():
-                if part not in SPEED_PARTS:
-                    continue
-                identity = oid(equip.get('_id')) or json.dumps(equip, sort_keys=True)
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                props = (equip.get('SubProps') or {}).get('SourceValues') or []
-                speed = next((
-                    float(prop.get('Value', prop.get('SValue', 0)) or 0)
-                    for prop in props if prop.get('PropertyType') == 'SpeedValue'
-                ), 0)
-                pool.append(dict(equip_id=identity, equip_type=part,
-                                 set_name=equip.get('Set'), speed=speed))
-    return pool
-
-
 def best_speed_combo(equips, used=None):
     """pvp_speed.py convention: five non-shoe pieces, rabbit bases 169/189."""
     used = used or set()
@@ -156,8 +127,15 @@ def best_speed_combo(equips, used=None):
     return best
 
 
-def theoretical_builds(cards):
-    equips = equipment_pool(cards)
+def theoretical_builds(conn, cuid):
+    equips = []
+    for row in conn.execute('SELECT * FROM pvp_equips WHERE cuid=?', (int(cuid),)):
+        if row['equip_type'] not in SPEED_PARTS:
+            continue
+        speed = next((float(row[f'sub{i}_value'] or 0) for i in range(1, 5)
+                      if row[f'sub{i}_prop'] == 'SpeedValue'), 0)
+        equips.append({'equip_id': row['equip_id'], 'equip_type': row['equip_type'],
+                       'set_name': row['set_name'], 'speed': speed})
     first = best_speed_combo(equips)
     used = {item['equip_id'] for item in first[1]} if first else set()
     return first, best_speed_combo(equips, used)
@@ -179,24 +157,24 @@ def _solution_lines(title, ranked, roles):
 SOLUTION_SQL = '''
 WITH matched AS (
     SELECT r.battle_id, r.round_idx, r.win
-    FROM gvg_rounds AS r
+    FROM gvg_rounds AS r INDEXED BY idx_gvg_rounds_recent
     WHERE r.start_ts >= ?
-      AND (SELECT COUNT(*) FROM gvg_units AS d
+      AND (SELECT COUNT(*) FROM gvg_units AS d INDEXED BY sqlite_autoindex_gvg_units_1
            WHERE d.battle_id=r.battle_id AND d.round_idx=r.round_idx
              AND d.side='def') = 3
-      AND (SELECT COUNT(DISTINCT d.role_id) FROM gvg_units AS d
+      AND (SELECT COUNT(DISTINCT d.role_id) FROM gvg_units AS d INDEXED BY sqlite_autoindex_gvg_units_1
            WHERE d.battle_id=r.battle_id AND d.round_idx=r.round_idx
              AND d.side='def' AND d.role_id IN (?, ?, ?)) = 3
 ), attacks AS (
     SELECT r.battle_id, r.round_idx, r.win,
            MIN(a.role_id) AS first_role, MAX(a.role_id) AS third_role,
-           (SELECT role_id FROM gvg_units AS middle
+           (SELECT role_id FROM gvg_units AS middle INDEXED BY sqlite_autoindex_gvg_units_1
             WHERE middle.battle_id=r.battle_id AND middle.round_idx=r.round_idx
               AND middle.side='atk'
             ORDER BY role_id LIMIT 1 OFFSET 1) AS second_role,
            MAX(CASE WHEN a.dead != 0 THEN 1 ELSE 0 END) AS dropped
     FROM matched AS r
-    CROSS JOIN gvg_units AS a
+    CROSS JOIN gvg_units AS a INDEXED BY sqlite_autoindex_gvg_units_1
       ON a.battle_id=r.battle_id AND a.round_idx=r.round_idx AND a.side='atk'
     GROUP BY r.battle_id, r.round_idx
     HAVING COUNT(*) = 3
@@ -233,18 +211,24 @@ def resolve_player(query, conn):
     query = str(query).strip()
     if not query:
         return None, '请输入玩家名或UID。'
-    fields = 'cuid, name, avatar_role_id'
+    latest = conn.execute('SELECT match_id, match_date FROM gvg_defence '
+                          'ORDER BY match_date DESC, id DESC LIMIT 1').fetchone()
+    if latest is None:
+        return None, '暂无团战防守数据，请先更新数据。'
+    scope = 'match_date=? AND match_id=?'
+    args = (latest['match_date'], latest['match_id'])
+    fields = 'id, cuid, name, avatar_role_id, match_id, match_date'
     if query.isdecimal():
         row = conn.execute(
-            f'SELECT {fields} FROM gvg_members WHERE cuid=?', (query,)
+            f'SELECT {fields} FROM gvg_defence WHERE {scope} AND cuid=?', (*args, query)
         ).fetchone()
         if row:
             return row, None
     conn.create_function('fold_name', 1, _fold)
     for predicate in ('fold_name(name) = ?', 'instr(fold_name(name), ?) > 0'):
         rows = conn.execute(
-            f'SELECT {fields} FROM gvg_members WHERE {predicate} '
-            'ORDER BY name, cuid', (_fold(query),)).fetchmany(13)
+            f'SELECT {fields} FROM gvg_defence WHERE {scope} AND {predicate} '
+            'ORDER BY name, cuid', (*args, _fold(query))).fetchmany(13)
         if len(rows) == 1:
             return rows[0], None
         if rows:
@@ -252,7 +236,7 @@ def resolve_player(query, conn):
             if len(rows) > 12:
                 message += '\n匹配过多，请输入更完整的名字或UID。'
             return None, message
-    return None, '没有找到玩家“{}”。'.format(query)
+    return None, '最近一场团战中没有找到玩家“{}”。'.format(query)
 
 
 MAIN_PROP_LABELS = {
@@ -264,83 +248,66 @@ MAIN_PROP_LABELS = {
 }
 
 
-def defence_role_line(role, stats, master):
-    equipment = role.get('EquipmentMap') or {}
-    counts = Counter((equipment.get(part) or {}).get('Set')
-                     for part in (*SPEED_PARTS, 'Shoes'))
-    sets = []
-    for set_id, count in counts.most_common():
-        if not set_id:
-            continue
-        required = max(int((master.equipment_sets.get(set_id) or {}).get('Count') or 99), 1)
-        active = count // required
-        if active:
-            sets.append('{}{}'.format(active if active > 1 else '',
-                                     master.equipment_set_name(set_id)))
-    main_props = ''.join(MAIN_PROP_LABELS.get(
-        ((equipment.get(part) or {}).get('MainProp') or {}).get('PropertyType'), '?')
-        for part in ('Shoes', 'Ring', 'Necklace'))
-    details = [''.join(sets) or '无成套', main_props]
-    bond = role.get('ArtifactData') or {}
-    if bond.get('StaticID'):
-        details.append('{}级{}'.format(bond.get('LV', '?'),
-                                     master.artifact_name(bond['StaticID'])))
-    details.append('{}生'.format(round(stats['HP'])))
-    return '{}：{}'.format(master.role_name(role['StaticID']), ' / '.join(details))
+def main_prop_text(kind, value):
+    kind = kind or ''
+    label = MAIN_PROP_LABELS.get(kind, '?')
+    if value is None:
+        return '?' + label if kind else '?'
+    number = float(value)
+    if kind.endswith('Rate'):
+        return '{:g}%{}'.format(round(number * 100, 2), label)
+    return '{:g}{}'.format(round(number, 2), label)
 
 
-_MASTER_SIGNATURE = None
+def load_artifact_names(path=MASTER_DB_PATH):
+    conn = sqlite3.connect(str(path))
+    try:
+        try:
+            rows = conn.execute("SELECT a.ID, COALESCE(i.Name, 'T_Item_Name_' || a.ID), c.Value "
+                'FROM Artifact a LEFT JOIN Item i ON i.ID=a.ID '
+                "LEFT JOIN CHS c ON c.Key=COALESCE(i.Name, 'T_Item_Name_' || a.ID)")
+        except sqlite3.OperationalError:
+            rows = conn.execute("SELECT a.ID, 'T_Item_Name_' || a.ID, c.Value FROM Artifact a "
+                                "LEFT JOIN CHS c ON c.Key='T_Item_Name_' || a.ID")
+        return {aid: value or (aid if key.startswith(('T_', 'UI_')) else key)
+                for aid, key, value in rows}
+    finally:
+        conn.close()
 
 
-def _load_stats_master(helper):
-    global _MASTER_SIGNATURE
-    path = Path(MASTER_DB_PATH).resolve()
-    stat = path.stat()
-    signature = (str(path), stat.st_mtime_ns, stat.st_size)
-    if _MASTER_SIGNATURE != signature or helper.MASTER is None \
-            or helper.MASTER.path.resolve() != path:
-        # Release the previous tables before constructing the replacement.
-        helper.MASTER = None
-        _MASTER_SIGNATURE = None
-        helper.load_master_data(path)
-        _MASTER_SIGNATURE = signature
-    return helper.MASTER
+def defence_role_line(row, roles, artifacts):
+    main_props = ' '.join(main_prop_text(row[part + '_prop'], row[part + '_value'])
+                         for part in ('shoes', 'ring', 'necklace'))
+    details = [row['sets'] or '无成套', main_props]
+    if row['artifact_id']:
+        details.append('{}级{}'.format(row['artifact_lv'] if row['artifact_lv'] is not None else '?',
+                                     artifacts.get(row['artifact_id'], row['artifact_id'])))
+    details.append('{}生'.format(row['hp']))
+    return '{}：{}'.format(roles.get(row['role_id'], row['role_id']), ' / '.join(details))
 
 
 def format_defence(query, db_path=DATA_DB_PATH):
-    from ..Frida import helper
-
-    with STATS_LOCK:
-        conn = connect_data(db_path)
-        try:
-            player, error = resolve_player(query, conn)
-            if error:
-                return error
-            defence = conn.execute(
-                "SELECT payload, snapshot_date FROM gvg_snapshots "
-                "WHERE cuid=? AND kind='defence' ORDER BY snapshot_date DESC LIMIT 1",
-                (player['cuid'],)).fetchone()
-            if defence is None:
-                return '该玩家暂无团战防守数据，请先更新数据。'
-            # Decode one snapshot at a time; retain only deduplicated equipment.
-            cards = (json.loads(row['payload']) for row in conn.execute(
-                "SELECT payload FROM gvg_snapshots WHERE cuid=? AND kind='equipment' "
-                'ORDER BY snapshot_date DESC', (player['cuid'],)))
-            builds = theoretical_builds(cards)
-            master = _load_stats_master(helper)
-            speeds = [format(build[0], 'g') if build else '-' for build in builds]
-            lines = [
-                '{} | CUID {}'.format(player['name'], player['cuid']),
-                '头像：{}'.format(master.role_name(player['avatar_role_id'])),
-                '一速：{} | 二速：{}'.format(*speeds),
-                '日期：{}'.format(defence['snapshot_date']),
-            ]
-            teams = json.loads(defence['payload'])['DefenceTeamData']
-            for key, label in (('FirstTeam', '上半'), ('SecondTeam', '下半')):
-                lines.append('── {} ──'.format(label))
-                roles = team_roles(teams.get(key) or {})
-                for role, stats in zip(roles, helper.calculate_team_stats(roles)):
-                    lines.append(defence_role_line(role, stats, master))
-            return '\n'.join(lines)
-        finally:
-            conn.close()
+    conn = connect_data(db_path)
+    try:
+        # Keep the parent lookup and child read in one snapshot during a refresh.
+        conn.execute('BEGIN')
+        player, error = resolve_player(query, conn)
+        if error:
+            return error
+        builds = theoretical_builds(conn, player['cuid'])
+        roles, artifacts = _role_name_map(), load_artifact_names()
+        speeds = [format(build[0], 'g') if build else '-' for build in builds]
+        lines = [
+            '{} | CUID {}'.format(player['name'], player['cuid']),
+            '头像：{}'.format(roles.get(player['avatar_role_id'], player['avatar_role_id'])),
+            '一速：{} | 二速：{}'.format(*speeds),
+            '日期：{}'.format(player['match_date']),
+        ]
+        for team, label in ((1, '上半'), (2, '下半')):
+            lines.append('── {} ──'.format(label))
+            for row in conn.execute('SELECT * FROM gvg_defence_units '
+                                    'WHERE defence_id=? AND team=? ORDER BY pos', (player['id'], team)):
+                lines.append(defence_role_line(row, roles, artifacts))
+        return '\n'.join(lines)
+    finally:
+        conn.close()
