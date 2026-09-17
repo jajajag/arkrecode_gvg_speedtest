@@ -7,6 +7,7 @@ from pathlib import Path
 from .database import ALIAS_PATH, DATA_DB_PATH, MASTER_DB_PATH, connect_data, now_ms
 
 RECENT_DAYS = 30
+SOLUTION_LIMIT = 10
 MILLIS_PER_DAY = 86400000
 SPEED_PARTS = ("Weapon", "Head", "Body", "Necklace", "Ring")
 SPEED_SET_BASE = 189
@@ -155,6 +156,7 @@ def _solution_lines(title, ranked, roles):
     return lines
 
 
+# Rank by posterior mean win rate with a Jeffreys Beta(0.5, 0.5) prior.
 SOLUTION_SQL = '''
 WITH matched AS (
     SELECT r.battle_id, r.round_idx, r.win
@@ -186,7 +188,9 @@ SELECT first_role, second_role, third_role,
 FROM attacks
 GROUP BY first_role, second_role, third_role
 HAVING SUM(win) > 0
-ORDER BY rate DESC, total DESC, drop_rate, first_role, second_role, third_role
+ORDER BY (SUM(win) + 0.5) / (COUNT(*) + 1) DESC,
+         rate DESC, total DESC, drop_rate, first_role, second_role, third_role
+LIMIT ?
 '''
 
 
@@ -199,7 +203,7 @@ def format_solutions(role_ids, db_path=DATA_DB_PATH):
     conn = connect_data(db_path)
     try:
         rows = conn.execute(SOLUTION_SQL, (
-            now_ms() - RECENT_DAYS * MILLIS_PER_DAY, *target))
+            now_ms() - RECENT_DAYS * MILLIS_PER_DAY, *target, SOLUTION_LIMIT))
         ranked = ((row['rate'], row['total'], row['drop_rate'],
                    (row['first_role'], row['second_role'], row['third_role']))
                   for row in rows)

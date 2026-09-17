@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 from pathlib import Path
 
@@ -32,6 +33,31 @@ from .daily import run_daily_cleanup
 from .master import update_master_db
 
 WORKFLOW_LOCK = threading.Lock()
+
+# User-confirmed season schedule: season 11 begins at week 662 (13 weeks each).
+GVG_SEASON_WEEKS = 13
+GVG_FIRST_SEASON_WEEK = 532
+
+
+def gvg_collection_pause(data):
+    """Wait for stable rankings through the first week's settlement (~1)."""
+    server = (data.get('GuildWarData') or {}).get('ServerInfo') or {}
+    try:
+        start_week = int(server['StartWeek'])
+        season = int(server['NowSeasonID'])
+        match = re.fullmatch(r'(\d+)~([135])', str(server['NowGuildWarID']))
+        if match is None or season < 1 or start_week != GVG_FIRST_SEASON_WEEK:
+            raise ValueError
+        week, day = map(int, match.groups())
+        first_week = start_week + GVG_SEASON_WEEKS * (season - 1)
+        if not first_week <= week < first_week + GVG_SEASON_WEEKS:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        return '赛季信息缺失或与13周规则不符，暂缓前20公会战绩采集'
+    if (week, day) < (first_week + 1, 3):
+        return '第{}赛季初期，前20公会战绩采集从 {}~3 开始（当前 {}）'.format(
+            season, first_week + 1, server['NowGuildWarID'])
+    return None
 
 # Borrowed from StardustChocolate/openrubi
 ALIAS_URL = (
@@ -376,15 +402,19 @@ def _update_all_with_progress(run_daily, progress, warnings):
         result['equipment'] = saved
         collection_warnings.extend(failures)
     else:
-        ranked_guilds = query_top_guilds(alt)
-        result['ranked_guilds'] = len(ranked_guilds)
-        battle_result = update_gvg_battles(alt, ranked_guilds)
-        result['battles'] = battle_result['saved']
-        for key, label in (('member_failures', '成员日志'),
-                           ('detail_failures', '战斗详情'),
-                           ('parse_failures', '战斗解析')):
-            if battle_result[key]:
-                collection_warnings.append('{}失败 {} 条'.format(label, battle_result[key]))
+        pause = gvg_collection_pause(war)
+        if pause:
+            result['gvg_collection_pause'] = pause
+        else:
+            ranked_guilds = query_top_guilds(alt)
+            result['ranked_guilds'] = len(ranked_guilds)
+            battle_result = update_gvg_battles(alt, ranked_guilds)
+            result['battles'] = battle_result['saved']
+            for key, label in (('member_failures', '成员日志'),
+                               ('detail_failures', '战斗详情'),
+                               ('parse_failures', '战斗解析')):
+                if battle_result[key]:
+                    collection_warnings.append('{}失败 {} 条'.format(label, battle_result[key]))
     try:
         collect_rank_equipment(alt)
     except Exception as exc:
@@ -441,6 +471,8 @@ def update_details_text(result):
         parts.append('敌方成员 {} 人'.format(result['members']))
     if result['battles'] is not None:
         parts.append('团战战斗新增 {} 场'.format(result['battles']))
+    if result.get('gvg_collection_pause'):
+        parts.append(result['gvg_collection_pause'])
     if 'equipment' in result:
         parts.append('装备采集 {} 人'.format(result['equipment']))
     parts.append('别名 {} 条'.format(result['aliases']))
