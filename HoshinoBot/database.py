@@ -51,10 +51,6 @@ CREATE TABLE IF NOT EXISTS plugin_meta (
 );
 CREATE INDEX IF NOT EXISTS idx_gvg_rounds_recent
     ON gvg_rounds(start_ts);
-CREATE INDEX IF NOT EXISTS idx_gvg_rounds_defender
-    ON gvg_rounds(def_cuid, atk_guild, start_ts);
-CREATE INDEX IF NOT EXISTS idx_gvg_units_role
-    ON gvg_units(side, role_id);
 CREATE TABLE IF NOT EXISTS pvp_equips (
     equip_id TEXT PRIMARY KEY,
     cuid INTEGER, player_name TEXT,
