@@ -1,3 +1,4 @@
+from collections import Counter
 import itertools
 import json
 import sqlite3
@@ -211,13 +212,13 @@ def resolve_player(query, conn):
     query = str(query).strip()
     if not query:
         return None, '请输入玩家名或UID。'
-    latest = conn.execute('SELECT match_id, match_date FROM gvg_defence '
+    latest = conn.execute('SELECT match_date FROM gvg_defence '
                           'ORDER BY match_date DESC, id DESC LIMIT 1').fetchone()
     if latest is None:
         return None, '暂无团战防守数据，请先更新数据。'
-    scope = 'match_date=? AND match_id=?'
-    args = (latest['match_date'], latest['match_id'])
-    fields = 'id, cuid, name, avatar_role_id, match_id, match_date'
+    scope = 'match_date=?'
+    args = (latest['match_date'],)
+    fields = 'id, cuid, name, avatar_role_id, match_date'
     if query.isdecimal():
         row = conn.execute(
             f'SELECT {fields} FROM gvg_defence WHERE {scope} AND cuid=?', (*args, query)
@@ -275,10 +276,19 @@ def load_artifact_names(path=MASTER_DB_PATH):
         conn.close()
 
 
-def defence_role_line(row, roles, artifacts):
+def load_set_names(path=MASTER_DB_PATH):
+    with sqlite3.connect(str(path)) as conn:
+        return {key: name.removesuffix('套装') for key, name in conn.execute(
+            'SELECT e.ID, COALESCE(c.Value,e.Name,e.ID) FROM EquipmentSet e '
+            'LEFT JOIN CHS c ON c.Key=e.Name')}
+
+
+def defence_role_line(row, roles, artifacts, set_names):
     main_props = ' '.join(main_prop_text(row[part + '_prop'], row[part + '_value'])
                          for part in ('shoes', 'ring', 'necklace'))
-    details = [row['sets'] or '无成套', main_props]
+    sets = ''.join((str(count) if count > 1 else '') + set_names.get(key, key)
+                   for key, count in Counter(filter(None, (row['sets'] or '').split(','))).items())
+    details = [sets or '无成套', main_props]
     if row['artifact_id']:
         details.append('{}级{}'.format(row['artifact_lv'] if row['artifact_lv'] is not None else '?',
                                      artifacts.get(row['artifact_id'], row['artifact_id'])))
@@ -296,6 +306,7 @@ def format_defence(query, db_path=DATA_DB_PATH):
             return error
         builds = theoretical_builds(conn, player['cuid'])
         roles, artifacts = _role_name_map(), load_artifact_names()
+        set_names = load_set_names()
         speeds = [format(build[0], 'g') if build else '-' for build in builds]
         lines = [
             '{} | CUID {}'.format(player['name'], player['cuid']),
@@ -307,7 +318,7 @@ def format_defence(query, db_path=DATA_DB_PATH):
             lines.append('── {} ──'.format(label))
             for row in conn.execute('SELECT * FROM gvg_defence_units '
                                     'WHERE defence_id=? AND team=? ORDER BY pos', (player['id'], team)):
-                lines.append(defence_role_line(row, roles, artifacts))
+                lines.append(defence_role_line(row, roles, artifacts, set_names))
         return '\n'.join(lines)
     finally:
         conn.close()

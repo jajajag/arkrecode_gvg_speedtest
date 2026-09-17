@@ -3,6 +3,7 @@ import argparse
 from contextlib import closing
 from datetime import datetime, timezone
 import json
+import re
 from pathlib import Path
 import sqlite3
 import uuid
@@ -38,20 +39,14 @@ def put_meta(conn, key, value):
 
 
 def match_meta(conn, date, guild_id='', guild_name=''):
-    match_id = date + ':' + str(guild_id or guild_name or 'unknown')
-    put_meta(conn, 'match:' + match_id, json.dumps({
+    put_meta(conn, date, json.dumps({
         'date': date, 'enemy_guild_id': str(guild_id), 'enemy_guild_name': str(guild_name),
     }, ensure_ascii=False, separators=(',', ':')))
-    return match_id
 
 
 def copy_exact(conn, table):
     fields = ','.join(columns(conn, table))
-    source_fields = fields
-    if table == 'gvg_defence_units' and 'team' not in columns(conn, table, 'legacy'):
-        source_fields = ','.join('half' if field == 'team' else field
-                                 for field in columns(conn, table))
-    conn.execute(f'INSERT INTO main.{table} ({fields}) SELECT {source_fields} FROM legacy.{table}')
+    conn.execute(f'INSERT INTO main.{table} ({fields}) SELECT {fields} FROM legacy.{table}')
     before = conn.execute(f'SELECT COUNT(*) FROM legacy.{table}').fetchone()[0]
     after = conn.execute(f'SELECT COUNT(*) FROM main.{table}').fetchone()[0]
     if before != after:
@@ -76,6 +71,56 @@ def import_equips(conn, schema):
                     'SELECT equip_id FROM main.pvp_equips LIMIT 1').fetchone():
         raise ValueError('旧装备 ID 校验失败')
     return count
+
+
+def import_defence_rows(conn, master_path, notices):
+    """Convert already flattened records; lost raw values cannot be recovered."""
+    old_format = 'match_id' in columns(conn, 'gvg_defence', 'legacy')
+    names = None
+    missing_values = 0
+    unit_columns = columns(conn, 'gvg_defence_units')
+    for parent in conn.execute('SELECT * FROM legacy.gvg_defence ORDER BY id'):
+        # The latest record wins if the old schema allowed multiple records per day.
+        conn.execute('DELETE FROM main.gvg_defence WHERE match_date=? AND cuid=?',
+                     (parent['match_date'], parent['cuid']))
+        cursor = conn.execute('INSERT INTO main.gvg_defence(match_date,cuid,name,avatar_role_id) '
+                              'VALUES (?,?,?,?)', tuple(parent[k] for k in
+                              ('match_date', 'cuid', 'name', 'avatar_role_id')))
+        for old in conn.execute('SELECT * FROM legacy.gvg_defence_units WHERE defence_id=?', (parent['id'],)):
+            unit = dict(old)
+            unit['defence_id'] = cursor.lastrowid
+            unit['team'] = unit.get('team', unit.get('half'))
+            unit['skill_levels'] = ','.join((unit.get('skill_levels') or '').split(',')[:3])
+            text = unit.get('sets') or ''
+            if text and not re.fullmatch(r'[A-Za-z0-9_,]+', text):
+                if names is None:
+                    with closing(sqlite3.connect(readonly_uri(master_path), uri=True)) as master:
+                        names = {name.removesuffix('套装'): key for name, key in master.execute(
+                            'SELECT COALESCE(c.Value,e.Name,e.ID),e.ID FROM EquipmentSet e '
+                            'LEFT JOIN CHS c ON c.Key=e.Name')}
+                result = []
+                while text:
+                    number = re.match(r'\d+', text)
+                    count = int(number[0]) if number else 1
+                    text = text[len(number[0]):] if number else text
+                    label = next((name for name in sorted(names, key=len, reverse=True)
+                                  if text.startswith(name)), None)
+                    if label is None:
+                        raise ValueError('无法识别旧套装文字：' + text)
+                    result.extend([names[label]] * count)
+                    text = text[len(label):]
+                unit['sets'] = ','.join(result)
+            if old_format:
+                for part in ('shoes', 'ring', 'necklace'):
+                    if unit[part + '_value'] == 0:
+                        unit[part + '_value'] = None
+                        missing_values += 1
+            conn.execute('INSERT INTO main.gvg_defence_units (' + ','.join(unit_columns) + ') VALUES ('
+                         + ','.join('?' for _ in unit_columns) + ')', tuple(unit[k] for k in unit_columns))
+    if old_format:
+        notices.append('旧明细缺少原始装备数据，无法重算历史血量；要修复血量请从含完整防守 JSON 的旧备份迁移。')
+    if missing_values:
+        notices.append(f'旧明细有 {missing_values} 项主属性为 0，已标为 NULL（未知）；恢复准确数值需要原始快照。')
 
 
 def import_snapshots(conn, old_tables, old_meta, master_path):
@@ -106,9 +151,9 @@ def import_snapshots(conn, old_tables, old_meta, master_path):
             if date == old_meta.get('current_match_date'):
                 guild_id = old_meta.get('current_enemy_guild_id') or guild_id
                 guild_name = old_meta.get('current_enemy_guild_name') or guild_name
-            match_id = match_meta(conn, date, guild_id, guild_name)
+            match_meta(conn, date, guild_id, guild_name)
             avatar = str(info.get('LeaderSID') or (member['avatar_role_id'] if member else '') or '')
-            insert_defence(conn, match_id, date, cuid, name, avatar, team, master_path)
+            insert_defence(conn, date, cuid, name, avatar, team, master_path)
         counts[row['kind']] += 1
     return counts
 
@@ -158,11 +203,10 @@ def migrate(source, output, backup=None, equipment_source=None, master_path=MAST
                 if 'master_catalog' in old_meta:
                     put_meta(conn, 'master_catalog', old_meta['master_catalog'])
                 for key, value in old_meta.items():
-                    if key.startswith('match:'):
+                    if key.startswith('match:') or re.fullmatch(r'\d{4}-\d{2}-\d{2}', key):
                         data = json.loads(value)
-                        put_meta(conn, key, json.dumps({field: data[field] for field in
-                                 ('date', 'enemy_guild_id', 'enemy_guild_name') if field in data},
-                                 ensure_ascii=False, separators=(',', ':')))
+                        date = data.get('date') or key.removeprefix('match:')[:10]
+                        match_meta(conn, date, data.get('enemy_guild_id', ''), data.get('enemy_guild_name', ''))
                 if old_meta.get('current_match_date') and (
                         old_meta.get('current_enemy_guild_id') or old_meta.get('current_enemy_guild_name')):
                     match_meta(conn, old_meta['current_match_date'],
@@ -175,12 +219,11 @@ def migrate(source, output, backup=None, equipment_source=None, master_path=MAST
                     imported += import_equips(conn, 'equipment_old')
                 if 'gvg_defence' in old_tables:
                     if 'team_data' in columns(conn, 'gvg_defence', 'legacy'):
-                        for row in conn.execute('SELECT * FROM legacy.gvg_defence'):
-                            insert_defence(conn, row['match_id'], row['match_date'], row['cuid'],
+                        for row in conn.execute('SELECT * FROM legacy.gvg_defence ORDER BY id'):
+                            insert_defence(conn, row['match_date'], row['cuid'],
                                            row['name'], row['avatar_role_id'], json.loads(row['team_data']), master_path)
                     else:
-                        copy_exact(conn, 'gvg_defence')
-                        copy_exact(conn, 'gvg_defence_units')
+                        import_defence_rows(conn, master_path, notices)
                 snapshot_counts = import_snapshots(conn, old_tables, old_meta, master_path)
                 if not imported:
                     notices.append('未导入旧 pvp_equips 记录；如此前迁移丢掉过此表，请用 --equipment-source 指定完整旧备份。')

@@ -629,17 +629,26 @@ def add_awaken(role_id, awaken_level, flat, rate):
             rate[stat] += num(row.get(prop))
 
 
+def property_value(prop):
+    """SValue carries serialized numeric values even when Value is zero."""
+    for key in ('SValue', 'Value'):
+        value = prop.get(key)
+        if value not in (None, ''):
+            return float(value)
+    return None
+
+
 def add_equips(equips, flat, rate):
     for equip in (equips or {}).values():
         main = equip.get("MainProp") or {}
         add_prop(
             flat, rate, main.get("PropertyType"),
-            main.get("Value", main.get("SValue")),
+            property_value(main),
         )
         for prop in (equip.get("SubProps") or {}).get("SourceValues") or []:
             add_prop(
                 flat, rate, prop.get("PropertyType"),
-                prop.get("Value", prop.get("SValue")),
+                property_value(prop),
             )
 
 

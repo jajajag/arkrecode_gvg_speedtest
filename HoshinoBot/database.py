@@ -8,6 +8,11 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from ..Frida.helper import property_value
+except ImportError:
+    from Frida.helper import property_value
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / 'data'
 DATA_DB_PATH = DATA_DIR / 'data.db'
@@ -60,12 +65,11 @@ CREATE TABLE IF NOT EXISTS pvp_equips (
 );
 CREATE TABLE IF NOT EXISTS gvg_defence (
     id INTEGER PRIMARY KEY,
-    match_id TEXT NOT NULL,
     match_date TEXT NOT NULL,
     cuid INTEGER NOT NULL,
     name TEXT NOT NULL,
     avatar_role_id TEXT,
-    UNIQUE (match_date, match_id, cuid)
+    UNIQUE (match_date, cuid)
 );
 CREATE TABLE IF NOT EXISTS gvg_defence_units (
     defence_id INTEGER NOT NULL REFERENCES gvg_defence(id) ON DELETE CASCADE,
@@ -112,9 +116,9 @@ def init_database(path=DATA_DB_PATH):
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if tables & {'gvg_members', 'gvg_current_members', 'gvg_snapshots', 'gvg_defences', 'pvp_meta'}:
             raise ValueError('检测到旧数据库，请先运行 migrate_gvg_db.py 并替换生成的新库')
-        if 'gvg_defence' in tables and 'team_data' in {
+        if 'gvg_defence' in tables and {'team_data', 'match_id'} & {
                 row[1] for row in conn.execute('PRAGMA table_info(gvg_defence)')}:
-            raise ValueError('检测到 JSON 防守表，请先运行 migrate_gvg_db.py')
+            raise ValueError('检测到旧版防守表，请先运行 migrate_gvg_db.py')
         if 'pvp_equips' in tables and 'observed_at' in {
                 row[1] for row in conn.execute('PRAGMA table_info(pvp_equips)')}:
             raise ValueError('检测到旧版装备时间戳，请先运行 migrate_gvg_db.py')
@@ -262,9 +266,9 @@ def card_equipment(card, cuid, name):
             row = [str(identity), int(cuid), str(name), part,
                    equip.get('StaticID'), equip.get('Set'), equip.get('ClassLV'),
                    int(equip.get('LV') or 0), main.get('PropertyType'),
-                   main.get('Value', main.get('SValue', 0))]
+                   property_value(main)]
             for prop in props:
-                row.extend((prop.get('PropertyType', ''), prop.get('Value', prop.get('SValue', 0))))
+                row.extend((prop.get('PropertyType', ''), property_value(prop)))
             yield tuple(row)
 
 
@@ -318,27 +322,28 @@ def defence_unit_rows(teams, master_path=MASTER_DB_PATH):
                     need = max(int((master.equipment_sets.get(set_id) or {}).get('Count') or 99), 1)
                     active = count // need
                     if active:
-                        sets.append(f'{active if active > 1 else ""}{master.equipment_set_name(set_id)}')
+                        sets.extend([set_id] * active)
                 bond = role.get('ArtifactData') or {}
                 skills = (role.get('Skills') or {}).get('Skills') or []
                 levels = ','.join(str(int(skill['Level']) - 1) if skill.get('Level') is not None else '?'
-                                  for skill in skills)
+                                  for skill in skills[:3])
                 row = [team, int(pos), role['StaticID'], role.get('LV', role.get('Level')),
                        role.get('Star'), role.get('AwakenLV'), role.get('ImprintLV'),
                        int(role['IsSelfImprint']) if 'IsSelfImprint' in role else None,
-                       bond.get('StaticID'), bond.get('LV'), levels, ''.join(sets)]
+                       bond.get('StaticID'), bond.get('LV'), levels, ','.join(sets)]
                 for part in ('Shoes', 'Ring', 'Necklace'):
                     prop = (equipment.get(part) or {}).get('MainProp') or {}
-                    row.extend((prop.get('PropertyType'), prop.get('Value', prop.get('SValue'))))
+                    row.extend((prop.get('PropertyType'), property_value(prop)))
                 row.append(round(panel['HP']))
                 rows.append(tuple(row))
     return rows
 
 
-def insert_defence(conn, match_id, match_date, cuid, name, avatar, teams, master_path=MASTER_DB_PATH):
+def insert_defence(conn, match_date, cuid, name, avatar, teams, master_path=MASTER_DB_PATH):
     units = defence_unit_rows(teams, master_path)
-    cursor = conn.execute('INSERT INTO gvg_defence(match_id,match_date,cuid,name,avatar_role_id) '
-                          'VALUES (?,?,?,?,?)', (match_id, match_date, int(cuid), name, avatar))
+    conn.execute('DELETE FROM gvg_defence WHERE match_date=? AND cuid=?', (match_date, int(cuid)))
+    cursor = conn.execute('INSERT INTO gvg_defence(match_date,cuid,name,avatar_role_id) '
+                          'VALUES (?,?,?,?)', (match_date, int(cuid), name, avatar))
     defence_id = cursor.lastrowid
     conn.executemany('INSERT INTO gvg_defence_units VALUES (' + ','.join('?' for _ in range(20)) + ')',
                      ((defence_id, *row) for row in units))
@@ -349,16 +354,15 @@ def save_defence_match(players, enemy, db_path=DATA_DB_PATH, match_date=None):
     if not players:
         return
     match_date = match_date or today()
-    match_id = match_date + ':' + str(enemy.get('id') or enemy.get('name') or 'unknown')
     conn = connect_data(db_path)
     try:
         with conn:
-            conn.execute('DELETE FROM gvg_defence WHERE match_date=? AND match_id=?', (match_date, match_id))
+            conn.execute('DELETE FROM gvg_defence WHERE match_date=?', (match_date,))
             for player in players:
                 info = player['PlayerInfo']
-                insert_defence(conn, match_id, match_date, info['CUID'], str(info.get('Name') or info['CUID']),
+                insert_defence(conn, match_date, info['CUID'], str(info.get('Name') or info['CUID']),
                                str(info.get('LeaderSID') or ''), player['DefenceTeamData'])
-            meta_set(conn, 'match:' + match_id, json.dumps({
+            meta_set(conn, match_date, json.dumps({
                 'date': match_date, 'enemy_guild_id': str(enemy.get('id') or ''),
                 'enemy_guild_name': str(enemy.get('name') or ''),
             }, ensure_ascii=False, separators=(',', ':')))
