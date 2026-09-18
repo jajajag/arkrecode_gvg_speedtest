@@ -253,15 +253,8 @@ MAIN_PROP_LABELS = {
 }
 
 
-def main_prop_text(kind, value):
-    kind = kind or ''
-    label = MAIN_PROP_LABELS.get(kind, '?')
-    if value is None:
-        return '?' + label if kind else '?'
-    number = float(value)
-    if kind.endswith('Rate'):
-        return '{:g}%{}'.format(round(number * 100, 2), label)
-    return '{:g}{}'.format(round(number, 2), label)
+def main_prop_text(kind):
+    return MAIN_PROP_LABELS.get(kind, '?')
 
 
 def load_artifact_names(path=MASTER_DB_PATH):
@@ -288,7 +281,7 @@ def load_set_names(path=MASTER_DB_PATH):
 
 
 def defence_role_line(row, roles, artifacts, set_names):
-    main_props = ' '.join(main_prop_text(row[part + '_prop'], row[part + '_value'])
+    main_props = ''.join(main_prop_text(row[part + '_prop'])
                          for part in ('shoes', 'ring', 'necklace'))
     sets = ''.join((str(count) if count > 1 else '') + set_names.get(key, key)
                    for key, count in Counter(filter(None, (row['sets'] or '').split(','))).items())
@@ -297,7 +290,7 @@ def defence_role_line(row, roles, artifacts, set_names):
         details.append('{}级{}'.format(row['artifact_lv'] if row['artifact_lv'] is not None else '?',
                                      artifacts.get(row['artifact_id'], row['artifact_id'])))
     details.append('{}生'.format(row['hp']))
-    return '{}：{}'.format(roles.get(row['role_id'], row['role_id']), ' / '.join(details))
+    return '{}：{}'.format(roles.get(row['role_id'], row['role_id']), ' | '.join(details))
 
 
 def format_defence(query, db_path=DATA_DB_PATH):

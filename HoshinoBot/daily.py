@@ -106,13 +106,6 @@ def intv(value, default=0):
 class DailyReport:
     def __init__(self):
         self.warnings = []
-        self.ok_counts = {}
-
-    def ok(self, section):
-        self.ok_counts[section] = self.ok_counts.get(section, 0) + 1
-
-    def skip(self, section, reason=None):
-        pass
 
     def warn(self, message):
         if message not in self.warnings and len(self.warnings) < 8:
@@ -126,17 +119,12 @@ def safe_call(client, report, section, route, data=None,
               skip_if=False, delay=(0.15, 0.35),
               report_failure=False):
     if skip_if:
-        report.skip(section)
         return None
     try:
-        result = client.call_once(route, data or {}, delay=delay)
-        report.ok(section)
-        return result
+        return client.call_once(route, data or {}, delay=delay)
     except Exception as exc:
         if report_failure:
             report.fail(section, exc)
-        else:
-            report.skip(section)
         return None
 
 
@@ -344,30 +332,9 @@ def pickup_from_login(login_data):
     return max(candidates)[2] if candidates else None
 
 
-def fallback_pickup(db_path=MASTER_DB_PATH):
-    if {'ID', 'Type'} - table_columns(db_path, 'Activity'):
-        return None
-    try:
-        conn = sqlite3.connect(str(db_path))
-        try:
-            rows = [
-                row[0] for row in conn.execute(
-                    "SELECT ID FROM Activity WHERE Type='SideStory'")
-                if re.fullmatch(r'BranchH\d+', str(row[0] or ''))
-            ]
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return None
-    branch = max(rows, key=lambda value: intv(value.replace('BranchH', '')),
-                 default=None)
-    return branch.replace('Branch', '') if branch else None
-
-
 def activity_scene_ids(pickup, db_path=MASTER_DB_PATH):
-    fallback = ['B{}_1_{}'.format(pickup, index) for index in range(1, 15)]
     if {'ID', 'Chapter'} - table_columns(db_path, 'Scene'):
-        return fallback
+        return []
     chapter = 'Branch{}'.format(pickup)
     prefix = 'B{}_1_'.format(pickup)
     try:
@@ -382,9 +349,9 @@ def activity_scene_ids(pickup, db_path=MASTER_DB_PATH):
         finally:
             conn.close()
     except sqlite3.Error:
-        return fallback
+        return []
     rows.sort(key=lambda scene_id: intv(scene_id.removeprefix(prefix)))
-    return rows or fallback
+    return rows
 
 
 def parse_team(raw):
@@ -409,9 +376,7 @@ def parse_team(raw):
     return members
 
 
-def role_skill_ids(role_static_id, conn=None):
-    if conn is None:
-        return []
+def role_skill_ids(role_static_id, conn):
     prefix = str(role_static_id or '').removeprefix('PVP')
     try:
         return [
@@ -499,7 +464,7 @@ def npc_camp(scene_id, db_path=MASTER_DB_PATH):
 
 def activity_npc_maps(pickup, db_path=MASTER_DB_PATH):
     if {'ID', 'Chapter', 'MyCampTeam'} - table_columns(db_path, 'Scene'):
-        return {1: {'0': {'StaticID': 'AcStory{}'.format(pickup), 'LV': 60}}}
+        return {}
     chapter = 'Branch{}'.format(pickup)
     prefix = 'B{}_1_'.format(pickup)
     try:
@@ -515,7 +480,7 @@ def activity_npc_maps(pickup, db_path=MASTER_DB_PATH):
         finally:
             conn.close()
     except sqlite3.Error:
-        return {1: {'0': {'StaticID': 'AcStory{}'.format(pickup), 'LV': 60}}}
+        return {}
     rows.sort(key=lambda row: intv(str(row['ID']).removeprefix(prefix)))
     maps = {}
     for row in rows:
@@ -530,12 +495,11 @@ def activity_npc_maps(pickup, db_path=MASTER_DB_PATH):
             str(pos): {'StaticID': item['sid'], 'LV': item['lv']}
             for pos, item in enumerate(source)
         }
-    return maps or {1: {'0': {'StaticID': 'AcStory{}'.format(pickup),
-                              'LV': 60}}}
+    return maps
 
 
 def current_event(login_data):
-    pickup = pickup_from_login(login_data) or fallback_pickup()
+    pickup = pickup_from_login(login_data)
     if not pickup:
         return None
     return {
@@ -560,7 +524,6 @@ def support_items(login_data):
 def run_guild_support(client, login_data, report):
     sups = support_items(login_data)
     if not sups.get('CUID'):
-        report.skip('佣兵团支援')
         return
     data = safe_call(
         client, report, '佣兵团支援', 'GuildHandler.QueryFullGuildData')
@@ -570,16 +533,12 @@ def run_guild_support(client, login_data, report):
     for item in aid_items:
         item_id = item.get('ItemID')
         if item.get('NowCount', 0) >= 8:
-            report.skip('佣兵团支援')
             continue
         if sups.get(item_id, 0) < 2:
-            report.skip('佣兵团支援')
             continue
         if get_nested(item, 'Requester', 'CUID') == sups['CUID']:
-            report.skip('佣兵团支援')
             continue
         if sups['CUID'] in (item.get('SupporterList') or []):
-            report.skip('佣兵团支援')
             continue
         result = safe_call(
             client,
@@ -601,6 +560,24 @@ def run_guild_support(client, login_data, report):
         )
 
 
+def donate_guild(client, login_data, report, route, item_id, count, unit_cost):
+    section = '佣兵团捐献'
+    items = get_nested(login_data, 'ItemContainer', 'Items') or []
+    item = next((item for item in items
+                 if str(item.get('StaticID')) == item_id), None)
+    balance = intv(item.get('Count')) if item is not None else 0
+    cost = count * unit_cost
+    # The server may return non-JSON for insufficient funds; check locally
+    # before sending the request, and never treat JSON errors as shortages.
+    if balance < cost:
+        return
+    result = safe_call(client, report, section, route,
+                       {'ItemID': item_id, 'Count': count},
+                       report_failure=True)
+    if result is not None:
+        item['Count'] = balance - cost
+
+
 def run_guild_daily(client, login_data, report):
     check_in = safe_call(
         client,
@@ -619,22 +596,10 @@ def run_guild_daily(client, login_data, report):
         'GuildHandler.GuildMemberDayCheckReward',
         report_failure=True,
     )
-    safe_call(
-        client,
-        report,
-        '佣兵团捐献',
-        'GuildHandler.DonateGold',
-        {'ItemID': '1', 'Count': 10},
-        report_failure=True,
-    )
-    safe_call(
-        client,
-        report,
-        '佣兵团捐献',
-        'GuildHandler.DonateCourage',
-        {'ItemID': '28', 'Count': 3},
-        report_failure=True,
-    )
+    donate_guild(client, login_data, report,
+                 'GuildHandler.DonateGold', '1', 10, 5000)
+    donate_guild(client, login_data, report,
+                 'GuildHandler.DonateCourage', '28', 3, 1)
 
 
 def store_record_map(login_data):
@@ -654,7 +619,6 @@ def store_bought_today(records, static_id):
 def claim_daily_free_summon(client, records, report):
     record = records.get(DAILY_FREE_SUMMON_ID)
     if not record:
-        report.skip('每日免费召唤')
         return
     buy_count = intv(record.get('BuyCount'))
     result = safe_call(
@@ -683,7 +647,6 @@ def run_basic_daily(client, login_data, event, report):
     lab = login_data.get('ArkStarForceLabData') or {}
     records = store_record_map(login_data)
     month = login_data.get('MonthSignInData') or {}
-    timing = login_data.get('TimingMailData') or {}
     activity_id = 'ActivitySignIn{}'.format(event['pickup']) if event else ''
     week_rows = get_nested(
         login_data, 'WeekSignInDataContainer', 'WeekSignInDataList') or []
@@ -736,24 +699,21 @@ def run_basic_daily(client, login_data, event, report):
             skip_if=store_bought_today(records, static_id),
         )
     abyss_scene = highest_passed_scene(login_data, r'Abyss_(\d+)')[1]
-    safe_call(
-        client,
-        report,
-        '深渊净化',
-        'SceneHandler.PurityScene',
-        {'StaticID': abyss_scene or 'Abyss_80'},
-    )
+    if abyss_scene:
+        safe_call(
+            client,
+            report,
+            '深渊净化',
+            'SceneHandler.PurityScene',
+            {'StaticID': abyss_scene},
+        )
     safe_call(client, report, '友情点', 'SupportFriendHandler.GetReward')
 
 
 def iter_finished_unrewarded_quests(node):
     if isinstance(node, dict):
         if node.get('IsFinish') is True and node.get('IsRewarded') is False:
-            quest_id = (
-                node.get('StaticID')
-                or node.get('ID')
-                or node.get('QuestStaticID')
-            )
+            quest_id = node.get('StaticID')
             if quest_id:
                 yield quest_id
         for value in node.values():
@@ -826,7 +786,6 @@ def battle_pass_id(login_data):
 def claim_battle_pass(client, login_data, report):
     activity_id = battle_pass_id(login_data)
     if not activity_id:
-        report.skip('通行证')
         return
     safe_call(
         client,
@@ -850,7 +809,7 @@ def npc_next_times(login_data):
     return result
 
 
-def npc_battle_end_data(scene_id, team, enemy_camp):
+def npc_battle_end_data(team, enemy_camp):
     enemy_roles = (enemy_camp or {}).get('PositionRoleMap') or {}
     return {
         'StartBattleInfo': {
@@ -878,12 +837,9 @@ def npc_battle_end_data(scene_id, team, enemy_camp):
 
 
 def run_npc_and_dispatch(client, login_data, team, report):
-    if not team:
-        report.skip('NPC')
-    else:
+    if team:
         for npc_id, next_time in npc_next_times(login_data).items():
             if next_time > now_ms():
-                report.skip('NPC')
                 continue
             scene_id = 'HellNPC_{}'.format(npc_id)
             ticket = safe_call(
@@ -896,7 +852,6 @@ def run_npc_and_dispatch(client, login_data, team, report):
             log_id = (ticket or {}).get('LogID')
             enemy_camp = npc_camp(scene_id)
             if not log_id or not enemy_camp:
-                report.skip('NPC')
                 continue
             safe_call(
                 client,
@@ -907,8 +862,7 @@ def run_npc_and_dispatch(client, login_data, team, report):
                     'NPCSceneID': scene_id,
                     'IsRevenge': 0,
                     'EnemyLogID': log_id,
-                    'EndData': npc_battle_end_data(
-                        scene_id, team, enemy_camp),
+                    'EndData': npc_battle_end_data(team, enemy_camp),
                 },
             )
 
@@ -917,7 +871,6 @@ def run_npc_and_dispatch(client, login_data, team, report):
     for quest in quests:
         static_id = quest.get('StaticID')
         if not static_id or date_ms(quest.get('FinishTime')) > now_ms():
-            report.skip('派遣')
             continue
         reward = safe_call(
             client,
@@ -961,19 +914,9 @@ def find_support_by_cuid(source, cuid):
     return None
 
 
-def support_placeholder(cuid):
-    return {
-        'PlayerRoleData': {
-            'PlayerInfo': {'CUID': intv(cuid)},
-            'RoleData': {'StaticID': 'H001'},
-        },
-    }
-
-
 def activity_support(client, report):
     support_cuid = intv(client.config.get('ActivitySupportCUID'))
     if not support_cuid:
-        report.skip('活动借人')
         return None
     data = safe_call(
         client,
@@ -981,8 +924,7 @@ def activity_support(client, report):
         '活动借人',
         'SupportFriendHandler.QueryBattleSupportDataList',
     )
-    return find_support_by_cuid(data, support_cuid) \
-        or support_placeholder(support_cuid)
+    return find_support_by_cuid(data, support_cuid)
 
 
 def finish_scene(client, report, section, scene_id, team, support=None,
@@ -1032,20 +974,16 @@ def finish_activity_opening(client, event, default_team, report, support=None):
 
 def urgent_scene_ids(source):
     scene_ids = []
-    for container in (
-            get_nested(source, 'UrgentMissionContainer'),
-            get_nested(source, 'AccountSaveData', 'UrgentMissionContainer'),
-    ):
-        for mission in get_nested(container or {}, 'Missions') or []:
-            scene_id = str(mission.get('SceneID') or '').strip()
-            if scene_id and scene_id not in scene_ids:
-                scene_ids.append(scene_id)
+    missions = get_nested(source, 'UrgentMissionContainer', 'Missions') or []
+    for mission in missions:
+        scene_id = str(mission.get('SceneID') or '').strip()
+        if scene_id and scene_id not in scene_ids:
+            scene_ids.append(scene_id)
     return scene_ids
 
 
 def run_urgent_missions(client, source, team, report, support=None, limit=20):
     if not team:
-        report.skip('紧急任务')
         return
     pending = urgent_scene_ids(source)
     finished = set()
@@ -1113,7 +1051,9 @@ def run_hunts(client, login_data, team, report):
         element = elements[index % len(elements)]
         _, scene_id = highest_passed_scene(
             login_data, r'Hunt{}_(\d+)'.format(element))
-        scene_id = scene_id or 'Hunt{}_11'.format(element)
+        if not scene_id:
+            report.warn('{}讨伐未执行：没有已通关关卡'.format(HUNT_NAMES[element]))
+            return
         data = finish_scene(
             client,
             report,
@@ -1147,12 +1087,10 @@ def desired_secret_item(record):
 
 
 def buy_secret_records(client, records, report):
-    bought = 0
     for record in records:
         if not desired_secret_item(record):
-            report.skip('神秘商店')
             continue
-        result = safe_call(
+        safe_call(
             client,
             report,
             '神秘商店',
@@ -1162,9 +1100,6 @@ def buy_secret_records(client, records, report):
                 'StaticID': record.get('StaticID'),
             }},
         )
-        if result is not None:
-            bought += 1
-    return bought
 
 
 def run_secret_shop(client, login_data, report):
@@ -1178,7 +1113,6 @@ def run_secret_shop(client, login_data, report):
     ))
     while True:
         if refreshes >= refresh_limit:
-            report.skip('神秘商店刷新')
             return
         buy_secret_records(client, records, report)
         data = safe_call(

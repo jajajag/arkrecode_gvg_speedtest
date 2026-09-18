@@ -48,11 +48,6 @@ def compute_speed(
             # Compute enemy's speed using Monte Carlo
             enemy_speed = (enemy_end_gauge[i] - enemy_start_gauge[i]) \
                     / (ally_end_gauge[j] - ally_start_gauge[j]) * allies[j][3]
-            # Enemy's strict speed bounds (Now we use Monte Carlo)
-            #min_speed = ally_speed * (enemy_end_lower - enemy_start_upper) \
-            #        / (ally_end_upper - ally_start_lower)
-            #max_speed = ally_speed * (enemy_end_upper - enemy_start_lower) \
-            #        / (ally_end_lower - ally_start_upper)
             enemy_min_speed = max(enemy_min_speed, np.min(enemy_speed))
             enemy_max_speed = min(enemy_max_speed, np.max(enemy_speed))
             enemy_speed_cat.append(enemy_speed)

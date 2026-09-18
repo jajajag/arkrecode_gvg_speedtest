@@ -128,14 +128,7 @@ def collect_rank_equipment(client, db_path=DATA_DB_PATH):
 
 def guild_members(guild_data):
     guild = guild_data.get('GuildData') or {}
-    members = None
-    for source in (guild, guild_data):
-        for key in ('MemberList', 'MemberInfoList'):
-            if key in source:
-                members = source[key]
-                break
-        if members is not None:
-            break
+    members = guild.get('MemberList')
     if not isinstance(members, list):
         raise GameRequestError('公会响应缺少成员列表')
     return members

@@ -92,7 +92,7 @@ def _parse_tokens_summary(text: str):
     is_int = lambda s: re.fullmatch(r"[+-]?\d+", s) is not None
     # Title
     title = tokens[0]
-    allies, enemies, notes = [], [], {}
+    allies, enemies = [], []
     i = 1
     while i < len(tokens):
         # (name, g1, g2)
@@ -147,13 +147,10 @@ async def speed_summary(bot, ev: CQEvent):
     msg = prefix + "，".join(lines)
     await bot.send(ev, msg, at_sender=False)
 
-#@sv.on_rex(r'^乱速\s*(\d+)\s+(\d+)$')
 @sv.on_rex(r'^乱速\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$')
 async def overtake(bot, ev: CQEvent):
     # Match input numbers
     match = ev['match']
-    #v1 = float(match.group(1))
-    #v2 = float(match.group(2))
     v1, v2 = sorted((float(match.group(1)), float(match.group(2))))
     try:
         # Calculate the overtaking probability
