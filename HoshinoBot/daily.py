@@ -1090,7 +1090,7 @@ def buy_secret_records(client, records, report):
     for record in records:
         if not desired_secret_item(record):
             continue
-        safe_call(
+        data = safe_call(
             client,
             report,
             '神秘商店',
@@ -1100,6 +1100,10 @@ def buy_secret_records(client, records, report):
                 'StaticID': record.get('StaticID'),
             }},
         )
+        if data is None:
+            report.warn('商店未刷满')
+            return False
+    return True
 
 
 def run_secret_shop(client, login_data, report):
@@ -1114,7 +1118,8 @@ def run_secret_shop(client, login_data, report):
     while True:
         if refreshes >= refresh_limit:
             return
-        buy_secret_records(client, records, report)
+        if not buy_secret_records(client, records, report):
+            return
         data = safe_call(
             client,
             report,
