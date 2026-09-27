@@ -87,6 +87,19 @@ CREATE TABLE IF NOT EXISTS gvg_defence_units (
     hp INTEGER NOT NULL,
     PRIMARY KEY (defence_id, team, pos)
 );
+CREATE TABLE IF NOT EXISTS gvg_members (
+    match_id TEXT NOT NULL,
+    match_date TEXT NOT NULL,
+    cuid INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    avatar_role_id TEXT,
+    guild_name TEXT NOT NULL,
+    max_speed TEXT,
+    info TEXT,
+    PRIMARY KEY (match_id, cuid)
+);
+CREATE INDEX IF NOT EXISTS idx_gvg_members_cuid_match
+    ON gvg_members(cuid, match_id);
 """
 
 def today():
@@ -110,8 +123,11 @@ def init_database(path=DATA_DB_PATH):
     conn = connect_data(path)
     try:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if tables & {'gvg_members', 'gvg_current_members', 'gvg_snapshots', 'gvg_defences', 'pvp_meta'}:
+        if tables & {'gvg_current_members', 'gvg_snapshots', 'gvg_defences', 'pvp_meta'}:
             raise ValueError('检测到旧数据库，请先运行 migrate_gvg_db.py 并替换生成的新库')
+        if 'gvg_members' in tables and 'match_id' not in {
+                row[1] for row in conn.execute('PRAGMA table_info(gvg_members)')}:
+            raise ValueError('检测到旧版 gvg_members，需先备份并迁移旧情报表')
         if 'gvg_defence' in tables and {'team_data', 'match_id'} & {
                 row[1] for row in conn.execute('PRAGMA table_info(gvg_defence)')}:
             raise ValueError('检测到旧版防守表，请先运行 migrate_gvg_db.py')
@@ -136,6 +152,61 @@ def meta_set(conn, key, value):
         'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
         (key, str(value)),
     )
+
+
+def save_member_match(match_id, target_guild, enemy_guild, members,
+                      db_path=DATA_DB_PATH):
+    """Keep one member row per war; refreshes preserve handwritten fields."""
+    init_database(db_path)
+    conn = connect_data(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        match_date = today()
+        for member in members:
+            cuid = int(member['cuid'])
+            previous = conn.execute('''
+                SELECT max_speed FROM gvg_members
+                WHERE cuid=? AND max_speed IS NOT NULL AND max_speed<>''
+                ORDER BY CAST(substr(match_id, 1, instr(match_id, '~') - 1) AS INTEGER) DESC,
+                         CAST(substr(match_id, instr(match_id, '~') + 1) AS INTEGER) DESC
+                LIMIT 1
+            ''', (cuid,)).fetchone()
+            speed = previous['max_speed'] if previous else None
+            conn.execute('''
+                INSERT INTO gvg_members(
+                    match_id, match_date, cuid, name, avatar_role_id,
+                    guild_name, max_speed, info
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(match_id, cuid) DO UPDATE SET
+                    name=excluded.name,
+                    avatar_role_id=excluded.avatar_role_id,
+                    guild_name=excluded.guild_name
+            ''', (match_id, match_date, cuid, member['name'],
+                  member['avatar_role_id'], enemy_guild['name'], speed))
+        meta_set(conn, 'sub_current_match_id', match_id)
+        meta_set(conn, 'sub_target_guild_id', target_guild['id'])
+        meta_set(conn, 'sub_target_guild_name', target_guild['name'])
+        meta_set(conn, 'sub_enemy_guild_id', enemy_guild['id'])
+        meta_set(conn, 'sub_enemy_guild_name', enemy_guild['name'])
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def clear_current_member_match(db_path=DATA_DB_PATH):
+    """A confirmed unmatched target has no current players to query."""
+    init_database(db_path)
+    conn = connect_data(db_path)
+    try:
+        with conn:
+            for key in ('sub_current_match_id', 'sub_enemy_guild_id',
+                        'sub_enemy_guild_name'):
+                meta_set(conn, key, '')
+    finally:
+        conn.close()
 
 
 def save_player_equipment(card, cuid, name, db_path=DATA_DB_PATH):

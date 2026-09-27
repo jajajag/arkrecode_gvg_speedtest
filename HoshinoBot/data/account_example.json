@@ -1,6 +1,7 @@
 {
   "MainAccount": {
     "Token": "大号 Token",
+    "GroupIDs": [111111111, 222222222],
     "RandomStoreDayRefreshLimit": 30,
     "DailyHuntRuns": {
       "Fire": 1,
@@ -13,6 +14,8 @@
   },
   "SubAccount": {
     "Token": "小号 Token",
+    "GroupIDs": [333333333, 444444444],
+    "TargetGuildID": "要查询其交战对手的公会 GID",
     "RandomStoreDayRefreshLimit": 30,
     "DailyHuntRuns": {
       "Fire": 1,

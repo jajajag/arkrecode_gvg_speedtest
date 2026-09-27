@@ -2,8 +2,19 @@ import asyncio
 import random
 import re
 
+from .api import group_account
 from .database import init_database
-from .queries import format_defence, format_solutions, resolve_roles
+from .queries import (
+    format_defence,
+    format_member_history,
+    format_member_player,
+    format_member_solutions,
+    format_solutions,
+    resolve_member_info_target,
+    resolve_roles,
+    set_max_speed,
+    set_member_info,
+)
 from .updater import (
     daily_result_text,
     run_daily_sync,
@@ -64,10 +75,20 @@ async def run_daily_job(service, bot=None, ev=None, notify_superuser=True):
         await report_to_superuser(message)
 
 
-GVG_HELP = (
+GVG_HELP_MAIN = (
     '团战指令：\n'
     '团战 [作业] 角色1 角色2 角色3\n'
     '团战 [数据] 玩家名或UID\n'
+    '团战 清日常（仅限Bot主）\n'
+    '团战 更新数据（仅限Bot主）'
+)
+GVG_HELP_SUB = (
+    '团战指令：\n'
+    '团战 [作业] 角色1 角色2 角色3\n'
+    '团战 一速 玩家名或UID 速度\n'
+    '团战 信息 玩家名或UID 内容\n'
+    '团战 历史 玩家名或UID\n'
+    '团战 玩家名或UID\n'
     '团战 清日常（仅限Bot主）\n'
     '团战 更新数据（仅限Bot主）'
 )
@@ -76,10 +97,30 @@ GVG_HELP = (
 QUERY_LOCK = asyncio.Lock()
 
 
-def query_reply(raw):
-    if raw == '数据' or re.match(r'数据\s', raw):
+def query_reply(raw, account='main', has_images=False):
+    if raw in ('防守', '胜率表') or re.match(r'(防守|胜率表)\s', raw):
+        return '该指令暂不支持。'
+    if account == 'alt' and (raw == '一速' or re.match(r'一速\s', raw)):
+        content = raw[len('一速'):].strip()
+        match = re.fullmatch(r'(.+?)\s+(\d{1,4}(?:-\d{1,4}|\+)?)', content)
+        if not match:
+            return '格式：团战 一速 玩家名或UID 227（或265-270、122+）'
+        return set_max_speed(match.group(1), match.group(2))
+    if account == 'alt' and (raw == '历史' or re.match(r'历史\s', raw)):
+        query = raw[len('历史'):].strip()
+        return (format_member_history(query) if query else
+                '格式：团战 历史 玩家名或UID')
+    if account == 'alt' and (raw == '信息' or re.match(r'信息\s', raw)):
+        if has_images:
+            return '当前版本的团战信息只支持文字。'
+        body = raw[len('信息'):].strip()
+        player, payload_start, error = resolve_member_info_target(body)
+        return error or set_member_info(player, body[payload_start:])
+    if account == 'main' and (raw == '数据' or re.match(r'数据\s', raw)):
         query = raw[2:].strip()
         return format_defence(query) if query else '格式：团战 数据 玩家名或UID'
+    if account == 'alt' and (raw == '数据' or re.match(r'数据\s', raw)):
+        return '小号群请用“团战 玩家名或UID”查询手动信息。'
     explicit = raw.startswith('作业')
     parts = (raw[2:].strip() if explicit else raw).split()
     if explicit or len(parts) == 3:
@@ -87,11 +128,12 @@ def query_reply(raw):
             return '格式：团战 [作业] 角色1 角色2 角色3'
         role_ids, error = resolve_roles(parts)
         if not error:
-            return format_solutions(role_ids)
+            return (format_member_solutions(role_ids) if account == 'alt'
+                    else format_solutions(role_ids))
         if explicit:
             return error
         # A player's full name may contain spaces.
-    return format_defence(raw)
+    return format_member_player(raw) if account == 'alt' else format_defence(raw)
 
 
 _REGISTERED = False
@@ -113,8 +155,17 @@ def register_gvg(service):
         raw = ev.message.extract_plain_text().strip()
         if raw.startswith(('测速', '总结')):
             return
+        try:
+            account = group_account(getattr(ev, 'group_id', None))
+        except Exception as exc:
+            service.logger.exception(exc)
+            await bot.send(ev, '团战群配置错误：{}'.format(exc), at_sender=False)
+            return
+        if account is None:
+            return
         if not raw:
-            await bot.send(ev, GVG_HELP, at_sender=False)
+            await bot.send(ev, GVG_HELP_MAIN if account == 'main'
+                           else GVG_HELP_SUB, at_sender=False)
             return
 
         if raw == '更新数据':
@@ -141,7 +192,12 @@ def register_gvg(service):
 
         try:
             async with QUERY_LOCK:
-                message = await asyncio.to_thread(query_reply, raw)
+                has_images = any(
+                    (segment.get('type') if hasattr(segment, 'get')
+                     else getattr(segment, 'type', None)) == 'image'
+                    for segment in ev.message)
+                message = await asyncio.to_thread(
+                    query_reply, raw, account, has_images)
         except Exception as exc:
             service.logger.exception(exc)
             message = '查询失败：{}'.format(exc)

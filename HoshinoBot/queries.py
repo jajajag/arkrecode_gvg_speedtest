@@ -1,10 +1,14 @@
 from collections import Counter
 import itertools
 import json
+import re
 import sqlite3
 from pathlib import Path
 
-from .database import ALIAS_PATH, DATA_DB_PATH, MASTER_DB_PATH, connect_data, now_ms
+from .database import (
+    ALIAS_PATH, DATA_DB_PATH, MASTER_DB_PATH, connect_data, init_database,
+    meta_get, now_ms,
+)
 
 RECENT_DAYS = 30
 SOLUTION_LIMIT = 10
@@ -193,6 +197,28 @@ ORDER BY (SUM(win) + 0.5) / (COUNT(*) + 1) DESC,
 LIMIT ?
 '''
 
+MATCHUP_SOLUTION_SQL = SOLUTION_SQL.replace(
+    'WHERE r.start_ts >= ?',
+    'WHERE r.start_ts >= ? AND r.atk_guild = ? AND r.def_guild = ?',
+)
+
+
+def ranked_solutions(conn, target, atk_guild=None, def_guild=None,
+                     limit=SOLUTION_LIMIT):
+    args = [now_ms() - RECENT_DAYS * MILLIS_PER_DAY]
+    if atk_guild is None or def_guild is None:
+        sql = SOLUTION_SQL
+    else:
+        sql = MATCHUP_SOLUTION_SQL
+        args.extend((atk_guild, def_guild))
+    args.extend(target)
+    args.append(limit)
+    return [
+        (row['rate'], row['total'], row['drop_rate'],
+         (row['first_role'], row['second_role'], row['third_role']))
+        for row in conn.execute(sql, args)
+    ]
+
 
 def format_solutions(role_ids, db_path=DATA_DB_PATH):
     target = tuple(sorted(role_ids))
@@ -202,11 +228,7 @@ def format_solutions(role_ids, db_path=DATA_DB_PATH):
     title = '防守：' + '+'.join(roles.get(role, role) for role in target)
     conn = connect_data(db_path)
     try:
-        rows = conn.execute(SOLUTION_SQL, (
-            now_ms() - RECENT_DAYS * MILLIS_PER_DAY, *target, SOLUTION_LIMIT))
-        ranked = ((row['rate'], row['total'], row['drop_rate'],
-                   (row['first_role'], row['second_role'], row['third_role']))
-                  for row in rows)
+        ranked = ranked_solutions(conn, target)
         return '\n'.join(_solution_lines(title, ranked, roles))
     finally:
         conn.close()
@@ -317,5 +339,212 @@ def format_defence(query, db_path=DATA_DB_PATH):
                                     'WHERE defence_id=? AND team=? ORDER BY pos', (player['id'], team)):
                 lines.append(defence_role_line(row, roles, artifacts, set_names))
         return '\n'.join(lines)
+    finally:
+        conn.close()
+
+
+# Sub-account member intelligence
+MATCH_ORDER = (
+    "CAST(substr(match_id, 1, instr(match_id, '~') - 1) AS INTEGER) DESC, "
+    "CAST(substr(match_id, instr(match_id, '~') + 1) AS INTEGER) DESC"
+)
+
+
+def _current_match(conn):
+    return meta_get(conn, 'sub_current_match_id') or ''
+
+
+def resolve_member_player(query, conn, current_only=True):
+    query = str(query).strip()
+    if not query:
+        return None, '请输入玩家名或UID。'
+    if current_only:
+        match_id = _current_match(conn)
+        if not match_id:
+            return None, '暂无小号当前团战名单，请先更新数据。'
+        rows = conn.execute(
+            'SELECT * FROM gvg_members WHERE match_id=? ORDER BY name, cuid',
+            (match_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            'SELECT * FROM gvg_members ORDER BY ' + MATCH_ORDER,
+        ).fetchall()
+        seen = set()
+        latest = []
+        for row in rows:
+            if row['cuid'] not in seen:
+                latest.append(row)
+                seen.add(row['cuid'])
+        rows = latest
+    folded = _fold(query)
+    for matches in (
+            [row for row in rows if _fold(row['name']) == folded],
+            [row for row in rows if str(row['cuid']) == query],
+            [row for row in rows if folded in _fold(row['name'])]):
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return None, _ambiguous_players(matches[:12])
+    return None, '没有找到玩家“{}”。'.format(query)
+
+
+def normalize_speed(value):
+    match = re.fullmatch(r'(\d{1,4})(?:(-)(\d{1,4})|(\+))?', value.strip())
+    if not match:
+        return None
+    lower = int(match.group(1))
+    upper = int(match.group(3)) if match.group(3) else None
+    if lower <= 0 or (upper is not None and upper < lower):
+        return None
+    if upper is not None:
+        return '{}-{}'.format(lower, upper)
+    return '{}+'.format(lower) if match.group(4) else str(lower)
+
+
+def set_max_speed(player_query, speed, db_path=DATA_DB_PATH):
+    normalized = normalize_speed(speed)
+    if normalized is None:
+        return '一速格式错误，请输入 227、265-270 或 122+。'
+    init_database(db_path)
+    conn = connect_data(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        player, error = resolve_member_player(player_query, conn)
+        if error:
+            return error
+        conn.execute(
+            'UPDATE gvg_members SET max_speed=? WHERE match_id=? AND cuid=?',
+            (normalized, player['match_id'], player['cuid']),
+        )
+        conn.commit()
+        return '已更新 {} 的一速：{}'.format(player['name'], normalized)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def resolve_member_info_target(text, db_path=DATA_DB_PATH):
+    """Find the longest player name that leaves at least one information word."""
+    conn = connect_data(db_path)
+    try:
+        conn.execute('BEGIN')
+        matches = list(re.finditer(r'\S+', text))
+        if len(matches) < 2:
+            return None, None, '格式：团战 信息 玩家名或UID 信息内容'
+        errors = []
+        for split_at in range(len(matches) - 1, 0, -1):
+            query = text[:matches[split_at - 1].end()].strip()
+            player, error = resolve_member_player(query, conn)
+            if player is not None:
+                return dict(player), matches[split_at].start(), None
+            errors.append(error)
+        return None, None, errors[-1] if errors else '没有找到玩家。'
+    finally:
+        conn.close()
+
+
+def set_member_info(player, info, db_path=DATA_DB_PATH):
+    info = str(info).strip()
+    if not info:
+        return '信息内容不能为空。'
+    init_database(db_path)
+    conn = connect_data(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            if _current_match(conn) != player['match_id']:
+                return '团战场次已变化，请重新输入信息。'
+            cursor = conn.execute(
+                'UPDATE gvg_members SET info=? WHERE match_id=? AND cuid=?',
+                (info, player['match_id'], player['cuid']),
+            )
+            if cursor.rowcount != 1:
+                return '玩家已不在当前团战名单中，请重新输入。'
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return '已保存 {} 的信息。'.format(player['name'])
+    finally:
+        conn.close()
+
+
+def format_member_history(player_query, db_path=DATA_DB_PATH, limit=5):
+    conn = connect_data(db_path)
+    try:
+        conn.execute('BEGIN')
+        player, error = resolve_member_player(player_query, conn, current_only=False)
+        if error:
+            return error
+        rows = conn.execute('''
+            SELECT match_id, match_date, guild_name, info
+            FROM gvg_members
+            WHERE cuid=? AND match_id<>? AND info IS NOT NULL AND trim(info)<>''
+            ORDER BY ''' + MATCH_ORDER + ' LIMIT ?',
+            (player['cuid'], _current_match(conn), int(limit)),
+        ).fetchall()
+        if not rows:
+            return '{} 暂无历史信息。'.format(player['name'])
+        lines = ['{} 的最近{}次历史信息：'.format(player['name'], len(rows))]
+        for index, row in enumerate(rows, 1):
+            lines.append('{}. {}（{}）对阵{}\n{}'.format(
+                index, row['match_date'], row['match_id'],
+                row['guild_name'], row['info']))
+        return '\n'.join(lines)
+    finally:
+        conn.close()
+
+
+def format_member_player(player_query, db_path=DATA_DB_PATH):
+    conn = connect_data(db_path)
+    try:
+        conn.execute('BEGIN')
+        player, error = resolve_member_player(player_query, conn)
+        if error:
+            return error
+        roles = _role_name_map()
+        avatar = roles.get(player['avatar_role_id'],
+                           player['avatar_role_id']) or '未知'
+        lines = ['{}（{}）'.format(player['name'], avatar)]
+        if player['max_speed']:
+            lines.append('一速：{}'.format(player['max_speed']))
+        if player['info']:
+            lines.append(player['info'])
+        return '\n'.join(lines)
+    finally:
+        conn.close()
+
+
+def format_member_solutions(role_ids, db_path=DATA_DB_PATH):
+    target = tuple(sorted(role_ids))
+    if len(target) != 3 or len(set(target)) != 3:
+        return '请输入三个不同角色。'
+    conn = connect_data(db_path)
+    try:
+        conn.execute('BEGIN')
+        if not _current_match(conn):
+            return '暂无小号当前团战信息，请先更新数据。'
+        our_guild = meta_get(conn, 'sub_target_guild_name') or ''
+        enemy_guild = meta_get(conn, 'sub_enemy_guild_name') or ''
+        if not our_guild or not enemy_guild:
+            return '暂无小号当前交战双方信息，请先更新数据。'
+        roles = _role_name_map()
+        title = '防守：' + '+'.join(roles.get(role, role) for role in target)
+        sections = []
+        for atk_guild, def_guild in (
+                (our_guild, enemy_guild), (enemy_guild, our_guild)):
+            ranked = ranked_solutions(
+                conn, target, atk_guild, def_guild, limit=-1)
+            if ranked:
+                sections.append('\n'.join(_solution_lines(
+                    '{}解法：'.format(atk_guild), ranked, roles)))
+        if not sections:
+            sections.append('近30天内无针对该防守的交手记录，以下为整体解法。')
+            sections.append('\n'.join(_solution_lines(
+                '整体解法：', ranked_solutions(conn, target), roles)))
+        return title + '\n' + '\n'.join(sections)
     finally:
         conn.close()

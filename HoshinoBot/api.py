@@ -77,6 +77,28 @@ def load_config(path=ACCOUNT_PATH, account='main'):
     return dict(selected)
 
 
+def group_account(group_id, path=ACCOUNT_PATH):
+    """Return the account assigned to a QQ group, or None for other groups."""
+    with _ACCOUNT_FILE_LOCK:
+        config = _read_account_file(path)
+    groups = {}
+    for account, key in ACCOUNT_KEYS.items():
+        selected = config.get(key) or {}
+        if not isinstance(selected, dict):
+            raise ConfigError('{} 必须是 JSON 对象'.format(key))
+        group_ids = selected.get('GroupIDs', [])
+        if not isinstance(group_ids, list):
+            raise ConfigError('{} 的 GroupIDs 必须是列表'.format(key))
+        for value in group_ids:
+            if isinstance(value, bool) or not str(value).isdecimal() or int(value) <= 0:
+                raise ConfigError('{} 的 GroupIDs 包含无效群号'.format(key))
+            normalized = str(int(value))
+            if normalized in groups:
+                raise ConfigError('群 {} 在 GroupIDs 中重复配置'.format(normalized))
+            groups[normalized] = account
+    return groups.get(str(group_id))
+
+
 def save_token(token, path=ACCOUNT_PATH, account='main'):
     """Merge only the refreshed credential; never overwrite the other account."""
     path = Path(path)

@@ -13,6 +13,7 @@ from .api import (
     query_bulletin,
     query_battle_detail,
     query_member_logs,
+    query_guild,
     query_top_guilds,
     query_pvp_ranks,
 )
@@ -21,12 +22,14 @@ from .database import (
     DATA_DB_PATH,
     MASTER_DB_PATH,
     connect_data,
+    clear_current_member_match,
     existing_battle_ids,
     init_database,
     meta_get,
     meta_set,
     save_battle_rows,
     save_defence_match,
+    save_member_match,
     save_player_equipment,
 )
 from .daily import run_daily_cleanup
@@ -58,6 +61,14 @@ def gvg_collection_pause(data):
         return '第{}赛季初期，前20公会战绩采集从 {}~3 开始（当前 {}）'.format(
             season, first_week + 1, server['NowGuildWarID'])
     return None
+
+
+def current_match_id(data):
+    server = (data.get('GuildWarData') or {}).get('ServerInfo') or {}
+    match_id = str(server.get('NowGuildWarID') or '')
+    if not re.fullmatch(r'\d+~[135]', match_id):
+        raise GameRequestError('团战响应缺少有效 NowGuildWarID')
+    return match_id
 
 # Borrowed from StardustChocolate/openrubi
 ALIAS_URL = (
@@ -129,9 +140,85 @@ def collect_rank_equipment(client, db_path=DATA_DB_PATH):
 def guild_members(guild_data):
     guild = guild_data.get('GuildData') or {}
     members = guild.get('MemberList')
+    if members is None:
+        members = guild.get('MemberInfoList')
+    if members is None:
+        members = guild_data.get('MemberList')
+    if members is None:
+        members = guild_data.get('MemberInfoList')
     if not isinstance(members, list):
         raise GameRequestError('公会响应缺少成员列表')
     return members
+
+
+def partial_guild_info(data):
+    guild = (data or {}).get('GuildData') or {}
+    info = (guild.get('Info') or guild.get('GuildInfo')
+            or guild.get('GuildSubInfo') or guild)
+    return {
+        'id': oid(info.get('_id') or guild.get('_id')),
+        'name': str(info.get('Name') or guild.get('Name') or ''),
+    }
+
+
+def partial_enemy_guild_id(data):
+    """Old partial-guild responses may nest the campaign at different levels."""
+    if isinstance(data, dict):
+        candidate = data.get('EnemyGuildID')
+        if candidate:
+            return oid(candidate)
+        for value in data.values():
+            guild_id = partial_enemy_guild_id(value)
+            if guild_id:
+                return guild_id
+    elif isinstance(data, list):
+        for value in data:
+            guild_id = partial_enemy_guild_id(value)
+            if guild_id:
+                return guild_id
+    return ''
+
+
+def collect_target_members(client, war_data=None, db_path=DATA_DB_PATH):
+    target_id = str(client.config.get('TargetGuildID') or
+                    client.config.get('GuildID') or '').strip()
+    if not target_id:
+        raise GameRequestError('SubAccount 缺少 TargetGuildID')
+    target_data = query_guild(client, target_id)
+    target = partial_guild_info(target_data)
+    if not target['name']:
+        raise GameRequestError('目标公会响应缺少公会名')
+    target['id'] = target['id'] or target_id
+    enemy_id = partial_enemy_guild_id(target_data)
+    if not enemy_id:
+        clear_current_member_match(db_path)
+        return {'target': target['name'], 'enemy': None,
+                'members': 0, 'match_id': None}
+    if war_data is None:
+        war_data = client.call('GuildWarHandler.QueryFullGuildWarData', {},
+                               required_key='GuildWarData')
+    match_id = current_match_id(war_data)
+    enemy_data = query_guild(client, enemy_id)
+    enemy = partial_guild_info(enemy_data)
+    if not enemy['name']:
+        raise GameRequestError('对手公会响应缺少公会名')
+    enemy['id'] = enemy['id'] or enemy_id
+    members = []
+    for item in guild_members(enemy_data):
+        player = item.get('PlayerInfo') or item
+        cuid = player.get('CUID')
+        if cuid is None:
+            raise GameRequestError('对手公会成员缺少 CUID')
+        members.append({
+            'cuid': int(cuid),
+            'name': str(player.get('Name') or cuid),
+            'avatar_role_id': str(player.get('LeaderSID') or ''),
+        })
+    if not members:
+        raise GameRequestError('对手公会没有成员数据')
+    save_member_match(match_id, target, enemy, members, db_path)
+    return {'target': target['name'], 'enemy': enemy['name'],
+            'members': len(members), 'match_id': match_id}
 
 
 def collect_gvg_battle_refs(client, guild_data_list):
@@ -317,6 +404,7 @@ def _update_all_sync(run_daily=False):
         '大号日常': '未执行' if run_daily else '未执行（本次仅更新数据）',
         '大号数据查询': '未执行',
         '小号日常': '未执行' if run_daily else '未执行（本次仅更新数据）',
+        '小号目标名单': '未执行',
         '小号数据采集': '未执行',
     }
     warnings = []
@@ -355,6 +443,8 @@ def _update_all_with_progress(run_daily, progress, warnings):
     if run_daily:
         progress['大号日常'] = cleanup_account(client)
     progress['大号数据查询'] = '运行中'
+    war = our_guild = enemy_guild = None
+    members = []
     try:
         war = client.call('GuildWarHandler.QueryFullGuildWarData', {},
                           required_key='GuildWarData')
@@ -370,14 +460,19 @@ def _update_all_with_progress(run_daily, progress, warnings):
         if run_daily:
             progress['小号日常'] = '未执行（登录失败）'
         raise
+    progress['小号目标名单'] = '运行中'
+    target_result = None
+    try:
+        target_result = collect_target_members(alt, war)
+        progress['小号目标名单'] = '正常'
+    except Exception as exc:
+        progress['小号目标名单'] = '失败：{}'.format(exc)
+
     if run_daily:
         progress['小号日常'] = cleanup_account(alt)
-    if progress['大号数据查询'] != '正常':
-        progress['小号数据采集'] = '未执行'
-        return {'warnings': warnings}
 
     result = {
-        'our_guild': our_guild['name'],
+        'our_guild': our_guild['name'] if our_guild else None,
         'enemy_guild': None,
         'members': None,
         'battles': None,
@@ -386,15 +481,24 @@ def _update_all_with_progress(run_daily, progress, warnings):
         'master_changed': master_changed,
         'warnings': warnings,
     }
+    if target_result:
+        result.update({
+            'target_guild': target_result['target'],
+            'target_enemy': target_result['enemy'],
+            'target_members': target_result['members'],
+            'target_match_id': target_result['match_id'],
+        })
 
     collection_warnings = []
-    if members:
+    if progress['大号数据查询'] != '正常':
+        collection_warnings.append('大号防守查询失败，跳过对手装备采集')
+    elif members:
         result['enemy_guild'] = enemy_guild['name']
         result['members'] = len(members)
         saved, failures = collect_equipment(alt, members)
         result['equipment'] = saved
         collection_warnings.extend(failures)
-    else:
+    elif war is not None:
         pause = gvg_collection_pause(war)
         if pause:
             result['gvg_collection_pause'] = pause
@@ -453,11 +557,20 @@ def update_result_text(result):
 
 def update_details_text(result):
     parts = []
-    if result['enemy_guild']:
+    if result.get('enemy_guild'):
         parts.append('当前对战 {} vs {}'.format(
             result['our_guild'], result['enemy_guild']))
+    elif not result.get('our_guild'):
+        parts.append('大号防守数据查询失败')
     else:
         parts.append('今日未开启团战')
+    if result.get('target_guild'):
+        if result.get('target_enemy'):
+            parts.append('小号目标 {} vs {}（{}，{} 人）'.format(
+                result['target_guild'], result['target_enemy'],
+                result['target_match_id'], result['target_members']))
+        else:
+            parts.append('小号目标 {} 暂无对手'.format(result['target_guild']))
     if result['ranked_guilds'] is not None:
         parts.append('前排团 {} 个'.format(result['ranked_guilds']))
     if result['members'] is not None:
