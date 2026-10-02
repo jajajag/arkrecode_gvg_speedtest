@@ -349,11 +349,9 @@ def query_top_guilds(client):
 
 
 def query_pvp_ranks(client):
+    """Query rankings using RankWeek from the login response."""
     pvp = (client.login_data or {}).get('PVPData') or {}
     week = (pvp.get('PVPRankInfo') or {}).get('RankWeek')
-    if week is None:
-        data = client.call('PVPHandler.QueryPVPData', {}, required_key='PVPData')
-        week = ((data.get('PVPData') or {}).get('PVPRankInfo') or {}).get('RankWeek')
     if week is None:
         raise GameRequestError('缺少竞技场 RankWeek，无法查询前百排名')
     data = client.call('PVPHandler.GetPVPRankList', {'Week': week},
