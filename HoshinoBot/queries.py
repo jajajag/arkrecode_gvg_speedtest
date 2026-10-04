@@ -1,4 +1,5 @@
-from collections import Counter
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
 import itertools
 import json
 import re
@@ -12,6 +13,7 @@ from .database import (
 
 RECENT_DAYS = 30
 SOLUTION_LIMIT = 10
+MAX_WRONGBOOK_MATCHES = 10
 MILLIS_PER_DAY = 86400000
 SPEED_PARTS = ("Weapon", "Head", "Body", "Necklace", "Ring")
 SPEED_SET_BASE = 189
@@ -93,6 +95,132 @@ def _role_name_map():
         return load_roles()
     except Exception:
         return {}
+
+
+def _gvg_match_date(start_ts):
+    """旧版口径：UTC周一、周三、周五，每个日期算一场团战。"""
+    match_day = datetime.fromtimestamp(int(start_ts) / 1000, timezone.utc)
+    return (match_day.strftime('%Y-%m-%d')
+            if match_day.weekday() in (0, 2, 4) else None)
+
+
+def _resolve_attack_guild(conn, query):
+    query = str(query).strip()
+    if not query:
+        return None, '格式：团战 错题本 团名 [场数]'
+    names = [str(row['atk_guild']) for row in conn.execute('''
+        SELECT DISTINCT atk_guild FROM gvg_rounds
+        WHERE TRIM(COALESCE(atk_guild, '')) != '' ORDER BY atk_guild
+    ''')]
+    folded = _fold(query)
+    exact = [name for name in names if _fold(name) == folded]
+    if exact:
+        return exact[0], None
+    partial = [name for name in names if folded in _fold(name)]
+    if len(partial) == 1:
+        return partial[0], None
+    if partial:
+        return None, '团名“{}”匹配多个佣兵团：{}。请使用完整团名。'.format(
+            query, '、'.join(partial[:12]))
+    return None, '没有找到“{}”的进攻记录。'.format(query)
+
+
+def _recent_gvg_matches(conn, atk_guild, limit):
+    matches = []
+    seen = set()
+    for row in conn.execute(
+            'SELECT start_ts FROM gvg_rounds '
+            'WHERE atk_guild=? ORDER BY start_ts DESC', (atk_guild,)):
+        date = _gvg_match_date(row['start_ts'])
+        if date is None or date in seen:
+            continue
+        matches.append(date)
+        seen.add(date)
+        if len(matches) == limit:
+            break
+    return matches
+
+
+def _wrongbook_results(conn, atk_guild, match_dates):
+    grouped = {date: defaultdict(lambda: {
+        False: defaultdict(set), True: defaultdict(set),
+    }) for date in match_dates}
+    start = datetime.strptime(min(match_dates), '%Y-%m-%d').replace(tzinfo=timezone.utc)
+    end = (datetime.strptime(max(match_dates), '%Y-%m-%d').replace(tzinfo=timezone.utc)
+           + timedelta(days=1))
+    rows = conn.execute('''
+        SELECT r.battle_id, r.round_idx, r.start_ts, r.atk_name, r.atk_cuid,
+               r.win, u.side, u.role_id
+        FROM gvg_rounds AS r
+        JOIN gvg_units AS u
+          ON r.battle_id=u.battle_id AND r.round_idx=u.round_idx
+        WHERE r.atk_guild=? AND r.start_ts>=? AND r.start_ts<?
+        ORDER BY r.start_ts, r.battle_id, r.round_idx, u.side, u.role_id
+    ''', (atk_guild, int(start.timestamp() * 1000), int(end.timestamp() * 1000)))
+    for _, items in itertools.groupby(rows, key=lambda row: (
+            row['battle_id'], row['round_idx'])):
+        items = list(items)
+        battle = items[0]
+        date = _gvg_match_date(battle['start_ts'])
+        if date not in grouped:
+            continue
+        teams = {side: tuple(sorted(unit['role_id'] for unit in items
+                                    if unit['side'] == side))
+                 for side in ('atk', 'def')}
+        if any(len(team) != 3 for team in teams.values()):
+            continue
+        attacker = str(battle['atk_name'] or battle['atk_cuid'] or '未知团员')
+        grouped[date][teams['def']][bool(battle['win'])][teams['atk']].add(attacker)
+    return grouped
+
+
+def _wrongbook_section(date, atk_guild, results, roles):
+    lines = ['{} {}错题本'.format(date, atk_guild)]
+    defenses = [(team, outcomes) for team, outcomes in results.items()
+                if outcomes[False]]
+    if not defenses:
+        return '\n'.join(lines + ['- 暂无进攻失败记录'])
+    defenses.sort(key=lambda item: (
+        -sum(len(names) for names in item[1][False].values()), item[0]))
+    for index, (def_team, outcomes) in enumerate(defenses, 1):
+        lines.append('{}. {}：'.format(
+            index, '+'.join(roles.get(role, role) for role in def_team)))
+        for win, label in ((False, '失败'), (True, '成功')):
+            attacks = sorted(outcomes[win].items(),
+                             key=lambda item: (-len(item[1]), item[0]))
+            entries = [
+                '{}（{}）'.format(
+                    '+'.join(roles.get(role, role) for role in atk_team),
+                    '，'.join(sorted(attackers, key=_fold)))
+                for atk_team, attackers in attacks
+            ]
+            lines.append('{}：'.format(label))
+            lines.extend('- ' + entry for entry in (entries or ['暂无记录']))
+    return '\n'.join(lines)
+
+
+def format_wrongbook(guild_query, match_count=1, db_path=DATA_DB_PATH):
+    try:
+        match_count = int(match_count)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('场数必须是1到{}之间的整数'.format(MAX_WRONGBOOK_MATCHES)) from exc
+    if not 1 <= match_count <= MAX_WRONGBOOK_MATCHES:
+        raise ValueError('场数必须是1到{}之间的整数'.format(MAX_WRONGBOOK_MATCHES))
+    conn = connect_data(db_path)
+    try:
+        conn.execute('BEGIN')
+        atk_guild, error = _resolve_attack_guild(conn, guild_query)
+        if error:
+            return error
+        match_dates = _recent_gvg_matches(conn, atk_guild, match_count)
+        if not match_dates:
+            return '没有找到“{}”的进攻记录。'.format(atk_guild)
+        results = _wrongbook_results(conn, atk_guild, match_dates)
+    finally:
+        conn.close()
+    roles = _role_name_map()
+    return '\n\n'.join(_wrongbook_section(date, atk_guild, results[date], roles)
+                       for date in match_dates)
 
 
 def _ambiguous_players(rows):

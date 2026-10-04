@@ -124,7 +124,6 @@ class GameClient:
         self.aid = None
         self.session_id = None
         self.cuid = None
-        self.bulletin = None
         self.login_data = None
         self._request_lock = threading.RLock()
 
@@ -207,7 +206,6 @@ class GameClient:
         self.cuid = account_info.get('CUID')
         if not self.aid or not self.session_id or self.cuid is None:
             raise GameRequestError('登录响应缺少 AID、SessionID 或 CUID')
-        self.bulletin = bulletin
         self.login_data = result
         return result
 

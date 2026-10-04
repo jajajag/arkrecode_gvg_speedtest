@@ -1,19 +1,21 @@
 import copy
+import json
+import math
 import re
 import sqlite3
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .api import GameRequestError, oid
-from .database import MASTER_DB_PATH
+from .database import (
+    DATA_DB_PATH, MASTER_DB_PATH, connect_data, meta_get, meta_set, now_ms,
+)
 
 
 HUNT_STATUS_ID = 'HuntActivity'
 HUNT_ELEMENTS = ('Fire', 'Ice', 'Earth', 'Light', 'Dark')
 HUNT_NAMES = dict(zip(HUNT_ELEMENTS, ('火', '水', '木', '光', '暗')))
-DEFAULT_HUNT_RUNS = {element: 1 for element in HUNT_ELEMENTS}
 DAILY_FREE_SUMMON_ID = 'NormalSummon'
 QUEST_BATCH_SIZE = 10
 SUPPORT_ITEM_IDS = ('CR14', 'CR24', 'CR34', 'CR44', 'CR54')
@@ -47,7 +49,12 @@ SECRET_SHOP_ITEMS = {
     'EC11', 'EC21', 'EC31', 'EC41', 'EC51', 'EC61',
     '5', '6',
 }
-DEFAULT_SECRET_SHOP_REFRESH_LIMIT = 30
+RAINBOW_SHOP_COMMODITY = 'RainbowStarSourceBox10'
+SHOP_EQUIPMENT_PREFIXES = {'E010', 'E016', 'E022', 'E028', 'E034'}
+SHOP_EQUIPMENT_PARTS = {
+    '1': 'Weapon', '2': 'Head', '3': 'Body',
+    '4': 'Necklace', '5': 'Ring', '6': 'Shoes',
+}
 
 
 def walk(value):
@@ -75,10 +82,6 @@ def date_ms(value):
         return int(value)
     except (TypeError, ValueError):
         return 0
-
-
-def now_ms():
-    return int(time.time() * 1000)
 
 
 def same_server_day(left_ms, right_ms=None):
@@ -288,7 +291,7 @@ def has_active_status(login_data, static_id):
 def hunt_run_counts(config):
     configured = config.get('DailyHuntRuns')
     if not isinstance(configured, dict):
-        return dict(DEFAULT_HUNT_RUNS)
+        configured = {}
     return {
         element: max(intv(configured.get(element), 1), 0)
         for element in HUNT_ELEMENTS
@@ -727,24 +730,13 @@ def iter_finished_unrewarded_quests(node):
             yield from iter_finished_unrewarded_quests(item)
 
 
-def unique_in_order(values):
-    seen = set()
-    result = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result
-
-
 def chunks(values, size):
     for start in range(0, len(values), size):
         yield values[start:start + size]
 
 
 def claim_quest_rewards(client, login_data, event, report):
-    quest_ids = unique_in_order(iter_finished_unrewarded_quests(login_data))
+    quest_ids = list(dict.fromkeys(iter_finished_unrewarded_quests(login_data)))
     for batch in chunks(quest_ids, QUEST_BATCH_SIZE):
         safe_call(
             client,
@@ -1080,19 +1072,84 @@ def secret_records(login_data):
     ]
 
 
-def desired_secret_item(record):
+def shop_equipment_templates(config, report):
+    templates = config.get('ShopEquipmentTemplates', [])
+    try:
+        if not isinstance(templates, list):
+            raise ValueError('必须是模板列表')
+        result = []
+        for template in templates:
+            if not isinstance(template, dict):
+                raise ValueError('每个模板必须是对象')
+            part = template.get('Part')
+            main_prop = template.get('MainProp')
+            sub_props = template.get('MinSubProps')
+            if part not in SHOP_EQUIPMENT_PARTS.values():
+                raise ValueError('Part 必须是有效装备部位')
+            if not isinstance(main_prop, str) or not main_prop.strip():
+                raise ValueError('MainProp 必须是主属性名称')
+            if not isinstance(sub_props, dict) or not sub_props:
+                raise ValueError('MinSubProps 必须包含副属性及最低值')
+            minimums = {}
+            for prop, value in sub_props.items():
+                if not isinstance(prop, str) or not prop.strip() or isinstance(value, bool):
+                    raise ValueError('副属性名称或最低值无效')
+                minimum = float(value)
+                if not math.isfinite(minimum) or minimum <= 0:
+                    raise ValueError('副属性最低值必须是正数')
+                minimums[prop] = minimum
+            result.append({'Part': part, 'MainProp': main_prop, 'MinSubProps': minimums})
+        return result
+    except (TypeError, ValueError) as exc:
+        report.warn('商店装备模板配置错误，跳过装备购买：{}'.format(exc))
+        return []
+
+
+def matches_shop_equipment(equip, templates):
+    """两种商店共用模板，只接受85级传说（ClassLV=4）。"""
+    if not isinstance(equip, dict) or equip.get('ClassLV') not in (4, '4'):
+        return False
+    static_id = str(equip.get('StaticID') or '')
+    if len(static_id) != 5 or static_id[:4] not in SHOP_EQUIPMENT_PREFIXES:
+        return False
+    part = SHOP_EQUIPMENT_PARTS.get(static_id[-1:])
+    main_prop = get_nested(equip, 'MainProp', 'PropertyType')
+    values = {}
+    source_values = get_nested(equip, 'SubProps', 'SourceValues')
+    if not isinstance(source_values, list):
+        return False
+    for prop in source_values:
+        if not isinstance(prop, dict):
+            continue
+        try:
+            value = float(prop.get('Value'))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and isinstance(prop.get('PropertyType'), str):
+            values[prop.get('PropertyType')] = value
+    return any(
+        part == template['Part'] and main_prop == template['MainProp']
+        and all(values.get(prop, float('-inf')) >= minimum
+                for prop, minimum in template['MinSubProps'].items())
+        for template in templates
+    )
+
+
+def desired_secret_item(record, templates=()):
+    if intv(record.get('BuyCount')) > 0:
+        return False
     items = get_nested(record, 'DropResult', 'Items') or []
     if not items:
         return False
     item = items[0].get('Item')
     if isinstance(item, dict):
         return str(item.get('StaticID') or '') in SECRET_SHOP_ITEMS
-    return False
+    return matches_shop_equipment(items[0].get('Equipment'), templates)
 
 
-def buy_secret_records(client, records, report):
+def buy_secret_records(client, records, report, templates=()):
     for record in records:
-        if not desired_secret_item(record):
+        if not desired_secret_item(record, templates):
             continue
         data = safe_call(
             client,
@@ -1107,22 +1164,25 @@ def buy_secret_records(client, records, report):
         if data is None:
             report.warn('商店未刷满')
             return False
+        record['BuyCount'] = intv(record.get('BuyCount')) + 1
     return True
 
 
-def run_secret_shop(client, login_data, report):
+def run_secret_shop(client, login_data, report, templates=None):
+    if templates is None:
+        templates = shop_equipment_templates(client.config, report)
     records = secret_records(login_data)
     account_save = login_data.setdefault('AccountSaveData', {})
     refreshes = max(0, intv(account_save.get(
         'RandomStoreDayRefreshCount')))
     refresh_limit = max(0, intv(
-        client.config.get('RandomStoreDayRefreshLimit'),
-        DEFAULT_SECRET_SHOP_REFRESH_LIMIT,
+        client.config.get('SecretShopDayRefreshLimit',
+                          client.config.get('RandomStoreDayRefreshLimit'))
     ))
     while True:
-        if refreshes >= refresh_limit:
+        if not buy_secret_records(client, records, report, templates):
             return
-        if not buy_secret_records(client, records, report):
+        if refreshes >= refresh_limit:
             return
         data = safe_call(
             client,
@@ -1138,7 +1198,70 @@ def run_secret_shop(client, login_data, report):
             return
         refreshes += 1
         account_save['RandomStoreDayRefreshCount'] = refreshes
-        records = data.get('Records') or []
+        records = data.get('Records')
+        if not isinstance(records, list):
+            report.warn('神秘商店刷新响应缺少商品列表')
+            return
+
+
+def reserve_rainbowshop_refresh(client, limit, db_path=DATA_DB_PATH):
+    """按账号、UTC日持久化刷新预算；发请求前计数，超时仍占用一次预算。"""
+    day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    key = 'rainbow_shop_refresh_{}'.format(client.account)
+    conn = connect_data(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        value = meta_get(conn, key)
+        state = json.loads(value) if value else {}
+        count = int(state.get('count', 0)) if state.get('day') == day else 0
+        if count < 0:
+            raise ValueError('rainbowshop刷新计数无效')
+        if count >= limit:
+            return False
+        meta_set(conn, key, json.dumps({'day': day, 'count': count + 1}))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def run_rainbowshop(client, report, templates=None):
+    if templates is None:
+        templates = shop_equipment_templates(client.config, report)
+    if not templates:
+        return
+    refresh_limit = max(0, intv(client.config.get('RainbowShopDayRefreshLimit')))
+    payload = {'CommodityID': RAINBOW_SHOP_COMMODITY}
+    data = safe_call(client, report, 'rainbowshop查询',
+                     'CustomEquipHandler.Query', payload, report_failure=True)
+    while isinstance(data, dict):
+        equips = get_nested(data, 'Data', 'CustomEquipDropList')
+        if not isinstance(equips, list):
+            report.warn('rainbowshop响应缺少装备列表')
+            return
+        for item_index, item in enumerate(equips):
+            if not isinstance(item, dict) or not matches_shop_equipment(
+                    item.get('Equipment'), templates):
+                continue
+            result = safe_call(
+                client, report, 'rainbowshop装备购买', 'StoreHandler.BuyCommodity',
+                {'Record': {'StaticID': RAINBOW_SHOP_COMMODITY},
+                 'Count': 1, 'ItemIndex': item_index}, report_failure=True)
+            if result is None:
+                report.warn('rainbowshop装备购买未完成')
+            # 与sniffer一致，一次购买一个候选；购买后列表状态已变化。
+            return
+        if refresh_limit == 0:
+            return
+        try:
+            if not reserve_rainbowshop_refresh(client, refresh_limit):
+                return
+        except Exception as exc:
+            report.fail('rainbowshop刷新计数', exc)
+            return
+        data = safe_call(client, report, 'rainbowshop刷新',
+                         'CustomEquipHandler.RefreshEquip', payload,
+                         report_failure=True)
 
 
 def run_daily_cleanup(client, login_data):
@@ -1154,10 +1277,9 @@ def run_daily_cleanup(client, login_data):
         run_hunts(client, login_data, team, report)
     else:
         run_activity(client, login_data, event, team, report)
-    run_secret_shop(client, login_data, report)
+    templates = shop_equipment_templates(client.config, report)
+    run_secret_shop(client, login_data, report, templates)
+    run_rainbowshop(client, report, templates)
     claim_battle_pass(client, login_data, report)
     claim_quest_rewards(client, login_data, event, report)
-    return {
-        'summary': '日常正常' if not report.warnings else None,
-        'warnings': report.warnings,
-    }
+    return {'warnings': report.warnings}

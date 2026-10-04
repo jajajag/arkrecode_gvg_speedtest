@@ -2,7 +2,15 @@
   "MainAccount": {
     "Token": "大号 Token",
     "GroupIDs": [111111111, 222222222],
-    "RandomStoreDayRefreshLimit": 30,
+    "SecretShopDayRefreshLimit": 0,
+    "RainbowShopDayRefreshLimit": 0,
+    "ShopEquipmentTemplates": [
+      {
+        "Part": "Necklace",
+        "MainProp": "CriticalRate",
+        "MinSubProps": {"SpeedValue": 4}
+      }
+    ],
     "DailyHuntRuns": {
       "Fire": 1,
       "Ice": 1,
@@ -16,7 +24,9 @@
     "Token": "小号 Token",
     "GroupIDs": [333333333, 444444444],
     "TargetGuildID": "要查询其交战对手的公会 GID",
-    "RandomStoreDayRefreshLimit": 30,
+    "SecretShopDayRefreshLimit": 0,
+    "RainbowShopDayRefreshLimit": 0,
+    "ShopEquipmentTemplates": [],
     "DailyHuntRuns": {
       "Fire": 1,
       "Ice": 1,

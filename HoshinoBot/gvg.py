@@ -10,6 +10,7 @@ from .queries import (
     format_member_player,
     format_member_solutions,
     format_solutions,
+    format_wrongbook,
     resolve_member_info_target,
     resolve_roles,
     set_max_speed,
@@ -79,6 +80,7 @@ GVG_HELP_MAIN = (
     '团战指令：\n'
     '团战 [作业] 角色1 角色2 角色3\n'
     '团战 [数据] 玩家名或UID\n'
+    '团战 错题本 团名 [场数]\n'
     '团战 清日常（仅限Bot主）\n'
     '团战 更新数据（仅限Bot主）'
 )
@@ -89,6 +91,7 @@ GVG_HELP_SUB = (
     '团战 信息 玩家名或UID 内容\n'
     '团战 历史 玩家名或UID\n'
     '团战 玩家名或UID\n'
+    '团战 错题本 团名 [场数]\n'
     '团战 清日常（仅限Bot主）\n'
     '团战 更新数据（仅限Bot主）'
 )
@@ -98,6 +101,12 @@ QUERY_LOCK = asyncio.Lock()
 
 
 def query_reply(raw, account='main', has_images=False):
+    if raw == '错题本' or re.match(r'错题本\s', raw):
+        content = raw[len('错题本'):].strip()
+        match = re.fullmatch(r'(.+?)(?:\s+(\d+))?', content)
+        if not match:
+            return '格式：团战 错题本 团名 [场数]'
+        return format_wrongbook(match.group(1), match.group(2) or 1)
     if raw in ('防守', '胜率表') or re.match(r'(防守|胜率表)\s', raw):
         return '该指令暂不支持。'
     if account == 'alt' and (raw == '一速' or re.match(r'一速\s', raw)):

@@ -106,7 +106,7 @@ def collect_defences(data, db_path=DATA_DB_PATH):
         members.append(member)
     if members and not enemy['name']:
         raise GameRequestError('敌方防守存在但缺少公会信息')
-    save_defence_match(players, enemy, db_path)
+    save_defence_match(players, db_path)
     return our, enemy, members
 
 
@@ -128,13 +128,11 @@ def collect_equipment(client, members, db_path=DATA_DB_PATH):
 
 def collect_rank_equipment(client, db_path=DATA_DB_PATH):
     rows = query_pvp_ranks(client)
-    saved = 0
     for item in rows[:100]:
         info = item.get('PlayerInfo') or {}
         if info.get('CUID') is None or not isinstance(item.get('PVPInfo'), dict):
             raise GameRequestError('竞技场排名缺少玩家或防守数据')
-        saved += save_player_equipment(item, info['CUID'], info.get('Name') or str(info['CUID']), db_path)
-    return saved
+        save_player_equipment(item, info['CUID'], info.get('Name') or str(info['CUID']), db_path)
 
 
 def guild_members(guild_data):
@@ -378,7 +376,7 @@ def update_master(bulletin, http):
         conn.commit()
     finally:
         conn.close()
-    return catalog, changed
+    return changed
 
 
 def update_all_sync(run_daily=False):
@@ -431,7 +429,7 @@ def _update_all_with_progress(run_daily, progress, warnings):
     with requests.Session() as download_session:
         try:
             bulletin = query_bulletin(download_session)
-            _, master_changed = update_master(
+            master_changed = update_master(
                 bulletin, download_session)
         except Exception as exc:
             warnings.append('master.db 更新失败：{}'.format(exc))

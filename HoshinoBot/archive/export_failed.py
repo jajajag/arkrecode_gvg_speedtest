@@ -7,7 +7,7 @@ from itertools import groupby
 from pathlib import Path
 
 
-DATA_DIR = Path(__file__).resolve().parent / 'data'
+DATA_DIR = Path(__file__).resolve().parent.parent / 'data'
 GUILD = '烟雨阁'
 RECENT_DAYS = 30
 BASE_HEADERS = [

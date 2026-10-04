@@ -414,10 +414,9 @@ def insert_defence(conn, match_date, cuid, name, avatar, teams, master_path=MAST
     defence_id = cursor.lastrowid
     conn.executemany('INSERT INTO gvg_defence_units VALUES (' + ','.join('?' for _ in range(20)) + ')',
                      ((defence_id, *row) for row in units))
-    return defence_id
 
 
-def save_defence_match(players, enemy, db_path=DATA_DB_PATH, match_date=None):
+def save_defence_match(players, db_path=DATA_DB_PATH, match_date=None):
     if not players:
         return
     match_date = match_date or today()
@@ -429,9 +428,5 @@ def save_defence_match(players, enemy, db_path=DATA_DB_PATH, match_date=None):
                 info = player['PlayerInfo']
                 insert_defence(conn, match_date, info['CUID'], str(info.get('Name') or info['CUID']),
                                str(info.get('LeaderSID') or ''), player['DefenceTeamData'])
-            meta_set(conn, match_date, json.dumps({
-                'date': match_date, 'enemy_guild_id': str(enemy.get('id') or ''),
-                'enemy_guild_name': str(enemy.get('name') or ''),
-            }, ensure_ascii=False, separators=(',', ':')))
     finally:
         conn.close()

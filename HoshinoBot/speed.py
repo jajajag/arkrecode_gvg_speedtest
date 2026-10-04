@@ -96,18 +96,3 @@ def overtake_prob(v1, v2):
         p = 361 / 2 * r - 380 + 200 / r
 
     return p
-
-
-if __name__ == '__main__':
-    ally_1 = ('水马', 1, 56, 135)
-    ally_2 = ('水琴', 1, 70, 170)
-    ally_3 = ('水拳', 4, 58, 131)
-    enemy_1 = ('朱茵', 1, 101)
-    enemy_2 = ('盖儿', 1, 84)
-    print(compute_speed([ally_1, ally_2, ally_3], [enemy_1, enemy_2], 
-                        N_sample=int(1e6)))
-    print(overtake_prob(100, 100))
-    print(overtake_prob(95, 100))
-    print(overtake_prob(100, 95))
-    print(overtake_prob(240, 246))
-    print(overtake_prob(246, 240))
