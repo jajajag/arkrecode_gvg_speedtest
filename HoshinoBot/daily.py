@@ -663,12 +663,16 @@ def run_basic_daily(client, login_data, event, report):
         skip_if=date_ms(reactor.get('NextCanReceiveTime')) > now_ms(),
     )
     for route, key in LAB_REWARD_ROUTES:
+        ready_time = date_ms(lab.get(key))
+        if key == 'NextCanReceiveTesseractTime':
+            # Each charge advances the module reward by one day.
+            ready_time -= intv(lab.get('TesseractChargeCount')) * 86_400_000
         safe_call(
             client,
             report,
             '星源实验室',
             route,
-            skip_if=date_ms(lab.get(key)) > now_ms(),
+            skip_if=ready_time > now_ms(),
         )
     safe_call(
         client,
