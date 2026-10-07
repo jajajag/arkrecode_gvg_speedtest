@@ -1072,39 +1072,6 @@ def secret_records(login_data):
     ]
 
 
-def shop_equipment_templates(config, report):
-    templates = config.get('ShopEquipmentTemplates', [])
-    try:
-        if not isinstance(templates, list):
-            raise ValueError('必须是模板列表')
-        result = []
-        for template in templates:
-            if not isinstance(template, dict):
-                raise ValueError('每个模板必须是对象')
-            part = template.get('Part')
-            main_prop = template.get('MainProp')
-            sub_props = template.get('MinSubProps')
-            if part not in SHOP_EQUIPMENT_PARTS.values():
-                raise ValueError('Part 必须是有效装备部位')
-            if not isinstance(main_prop, str) or not main_prop.strip():
-                raise ValueError('MainProp 必须是主属性名称')
-            if not isinstance(sub_props, dict) or not sub_props:
-                raise ValueError('MinSubProps 必须包含副属性及最低值')
-            minimums = {}
-            for prop, value in sub_props.items():
-                if not isinstance(prop, str) or not prop.strip() or isinstance(value, bool):
-                    raise ValueError('副属性名称或最低值无效')
-                minimum = float(value)
-                if not math.isfinite(minimum) or minimum <= 0:
-                    raise ValueError('副属性最低值必须是正数')
-                minimums[prop] = minimum
-            result.append({'Part': part, 'MainProp': main_prop, 'MinSubProps': minimums})
-        return result
-    except (TypeError, ValueError) as exc:
-        report.warn('商店装备模板配置错误，跳过装备购买：{}'.format(exc))
-        return []
-
-
 def matches_shop_equipment(equip, templates):
     """两种商店共用模板，只接受85级传说（ClassLV=4）。"""
     if not isinstance(equip, dict) or equip.get('ClassLV') not in (4, '4'):
@@ -1129,6 +1096,7 @@ def matches_shop_equipment(equip, templates):
             values[prop.get('PropertyType')] = value
     return any(
         part == template['Part'] and main_prop == template['MainProp']
+        and ('Set' not in template or equip.get('Set') == template['Set'])
         and all(values.get(prop, float('-inf')) >= minimum
                 for prop, minimum in template['MinSubProps'].items())
         for template in templates
@@ -1170,7 +1138,7 @@ def buy_secret_records(client, records, report, templates=()):
 
 def run_secret_shop(client, login_data, report, templates=None):
     if templates is None:
-        templates = shop_equipment_templates(client.config, report)
+        templates = client.config.get('ShopEquipmentTemplates', [])
     records = secret_records(login_data)
     account_save = login_data.setdefault('AccountSaveData', {})
     refreshes = max(0, intv(account_save.get(
@@ -1205,7 +1173,7 @@ def run_secret_shop(client, login_data, report, templates=None):
 
 
 def reserve_rainbowshop_refresh(client, limit, db_path=DATA_DB_PATH):
-    """按账号、UTC日持久化刷新预算；发请求前计数，超时仍占用一次预算。"""
+    """返回本次刷新序号，额度用完返回 False；超时仍占用一次预算。"""
     day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     key = 'rainbow_shop_refresh_{}'.format(client.account)
     conn = connect_data(db_path)
@@ -1220,14 +1188,14 @@ def reserve_rainbowshop_refresh(client, limit, db_path=DATA_DB_PATH):
             return False
         meta_set(conn, key, json.dumps({'day': day, 'count': count + 1}))
         conn.commit()
-        return True
+        return count + 1
     finally:
         conn.close()
 
 
 def run_rainbowshop(client, report, templates=None):
     if templates is None:
-        templates = shop_equipment_templates(client.config, report)
+        templates = client.config.get('ShopEquipmentTemplates', [])
     if not templates:
         return
     refresh_limit = max(0, intv(client.config.get('RainbowShopDayRefreshLimit')))
@@ -1249,12 +1217,14 @@ def run_rainbowshop(client, report, templates=None):
                  'Count': 1, 'ItemIndex': item_index}, report_failure=True)
             if result is None:
                 report.warn('rainbowshop装备购买未完成')
-            # 与sniffer一致，一次购买一个候选；购买后列表状态已变化。
-            return
+                return
+            # 购买成功后刷新，避免把已购买的旧列表留到下次运行。
+            break
         if refresh_limit == 0:
             return
         try:
-            if not reserve_rainbowshop_refresh(client, refresh_limit):
+            refresh_count = reserve_rainbowshop_refresh(client, refresh_limit)
+            if not refresh_count:
                 return
         except Exception as exc:
             report.fail('rainbowshop刷新计数', exc)
@@ -1262,6 +1232,9 @@ def run_rainbowshop(client, report, templates=None):
         data = safe_call(client, report, 'rainbowshop刷新',
                          'CustomEquipHandler.RefreshEquip', payload,
                          report_failure=True)
+        # 最后一次刷新只留下新列表，下次运行查询时再判断购买。
+        if refresh_count >= refresh_limit:
+            return
 
 
 def run_daily_cleanup(client, login_data):
@@ -1277,7 +1250,7 @@ def run_daily_cleanup(client, login_data):
         run_hunts(client, login_data, team, report)
     else:
         run_activity(client, login_data, event, team, report)
-    templates = shop_equipment_templates(client.config, report)
+    templates = client.config.get('ShopEquipmentTemplates', [])
     run_secret_shop(client, login_data, report, templates)
     run_rainbowshop(client, report, templates)
     claim_battle_pass(client, login_data, report)

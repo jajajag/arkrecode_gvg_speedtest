@@ -6,9 +6,10 @@
     "RainbowShopDayRefreshLimit": 0,
     "ShopEquipmentTemplates": [
       {
+        "Set": "Speed",
         "Part": "Necklace",
         "MainProp": "CriticalRate",
-        "MinSubProps": {"SpeedValue": 4}
+        "MinSubProps": {"SpeedValue": 2}
       }
     ],
     "DailyHuntRuns": {
