@@ -900,27 +900,16 @@ def run_npc_and_dispatch(client, login_data, team, report):
     )
 
 
-def find_support_by_cuid(source, cuid):
-    target = intv(cuid)
-    for item in walk(source):
-        player_cuid = intv(get_nested(
-            item, 'PlayerRoleData', 'PlayerInfo', 'CUID'))
-        if player_cuid == target and 'PlayerRoleData' in item:
-            return copy.deepcopy(item)
-    return None
-
-
-def activity_support(client, report):
+def activity_support(client):
     support_cuid = intv(client.config.get('ActivitySupportCUID'))
     if not support_cuid:
         return None
-    data = safe_call(
-        client,
-        report,
-        '活动借人',
-        'SupportFriendHandler.QueryBattleSupportDataList',
-    )
-    return find_support_by_cuid(data, support_cuid)
+    return {
+        'PlayerRoleData': {
+            'PlayerInfo': {'CUID': support_cuid},
+            'RoleData': {'StaticID': 'H001'},
+        },
+    }
 
 
 def finish_scene(client, report, section, scene_id, team, support=None,
@@ -1005,7 +994,7 @@ def run_activity(client, login_data, event, team, report):
     pickup = event['pickup']
     _, scene_id = highest_passed_scene(
         login_data, r'B{}_1_(\d+)'.format(re.escape(pickup)))
-    support = activity_support(client, report)
+    support = activity_support(client)
     opening_warning_count = len(report.warnings)
     if not scene_id:
         scene_id = finish_activity_opening(
