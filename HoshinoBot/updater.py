@@ -9,7 +9,6 @@ from .api import (
     GameRequestError,
     get_game_client,
     oid,
-    team_roles,
     query_bulletin,
     query_battle_detail,
     query_member_logs,
@@ -99,10 +98,6 @@ def collect_defences(data, db_path=DATA_DB_PATH):
         if info.get('CUID') is None or not isinstance(defence, dict):
             raise GameRequestError('敌方成员缺少 CUID 或防守数据')
         member = dict(cuid=int(info['CUID']), name=str(info.get('Name') or info['CUID']))
-        for key in ('FirstTeam', 'SecondTeam'):
-            roles = team_roles(defence.get(key) or {})
-            if len(roles) != 3:
-                raise GameRequestError('敌方防守阵容不完整，暂不更新当前名单')
         members.append(member)
     if members and not enemy['name']:
         raise GameRequestError('敌方防守存在但缺少公会信息')
