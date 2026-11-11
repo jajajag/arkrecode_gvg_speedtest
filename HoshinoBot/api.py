@@ -1,4 +1,3 @@
-import base64
 import json
 import random
 import threading
@@ -72,8 +71,9 @@ def load_config(path=ACCOUNT_PATH, account='main'):
     selected = config.get(key)
     if not isinstance(selected, dict):
         raise ConfigError('account.json 缺少 {} 配置'.format(key))
-    if not str(selected.get('Token') or '').strip():
-        raise ConfigError('{} 缺少：Token'.format(key))
+    for field in ('Token', 'DeviceID'):
+        if not str(selected.get(field) or '').strip():
+            raise ConfigError('{} 缺少：{}'.format(key, field))
     return dict(selected)
 
 
@@ -160,45 +160,39 @@ class GameClient:
         return self._post(GAME_URL, {'route': route, 'data': data})
 
     def _login_once(self):
+        device_id = self.config.get('DeviceID')
+        if not str(device_id or '').strip():
+            raise ConfigError('新版 SDK 登录缺少 DeviceID，请填写获取 refreshToken 时的设备 ID')
+
         bulletin = query_bulletin(self.http)
         info = bulletin.get('Info') or {}
         versions = info.get('AvailableVersions') or []
         if not versions:
             raise GameRequestError('公告响应缺少 AvailableVersions')
 
-        token = self.config['Token']
-        parts = token.split('.')
-        if len(parts) < 2:
-            raise ConfigError('Token 不是有效的 JWT')
-        encoded = parts[1] + '=' * (-len(parts[1]) % 4)
-        try:
-            token_data = json.loads(base64.urlsafe_b64decode(encoded))
-            login_id = token_data['user_id']
-        except Exception as exc:
-            raise ConfigError('Token 无法解析 user_id') from exc
-
-        is_new_sdk = 'exp' in token_data
-        login_token = token
-        if is_new_sdk:
-            headers = dict(GAME_HEADERS)
-            headers['Authorization'] = 'Bearer {}'.format(token)
-            token_result = self._post(
-                TOKEN_URL, headers=headers, timeout=60)
-            token_payload = token_result.get('data') or {}
-            login_id = token_payload.get('userId')
-            login_token = token_payload.get('accessToken')
-            refresh_token = token_payload.get('refreshToken')
-            if not login_id or not login_token or not refresh_token:
-                raise GameRequestError('刷新 Token 的响应字段不完整')
-            self.config['Token'] = refresh_token
-            save_token(refresh_token, self.account_path, self.account)
+        # Token stores the SDK refreshToken; use the returned accessToken to log in.
+        headers = dict(GAME_HEADERS)
+        headers['Authorization'] = 'Bearer {}'.format(self.config['Token'])
+        headers['DeviceId'] = device_id
+        token_result = self._post(TOKEN_URL, headers=headers, timeout=60)
+        token_payload = token_result.get('data')
+        if not isinstance(token_payload, dict) or not all(
+                token_payload.get(field)
+                for field in ('userId', 'accessToken', 'refreshToken')):
+            raise GameRequestError('刷新 Token 的响应字段不完整')
+        login_id = token_payload['userId']
+        login_token = token_payload['accessToken']
+        refresh_token = token_payload['refreshToken']
+        self.config['Token'] = refresh_token
+        save_token(refresh_token, self.account_path, self.account)
 
         result = self._send_route('AccountHandler.Login', {
             'LoginID': login_id,
             'Token': login_token,
             'Version': versions[-1],
             'LoginType': 'Erolabs',
-            'IsNewSDK': is_new_sdk,
+            'IsNewSDK': True,
+            'DeviceID': device_id,
         })
         account_info = result.get('Info') or {}
         self.aid = oid(account_info.get('_id'))
