@@ -619,11 +619,41 @@ def store_bought_today(records, static_id):
     return same_server_day(date_ms(record.get('LastBuyTime')))
 
 
+def daily_free_summon_limit(login_data, db_path=MASTER_DB_PATH):
+    """Base free allowance plus active account/activity summon bonuses."""
+    if not Path(db_path).is_file():
+        return 1
+    conn = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            'SELECT FreeCount FROM Commodity WHERE ID=?',
+            (DAILY_FREE_SUMMON_ID,),
+        ).fetchone()
+        base_count = max(0, intv(row[0])) if row else 1
+        bonuses = conn.execute(
+            'SELECT ID, Value FROM ServerStatus '
+            'WHERE Type=? AND ConditionValue=?',
+            ('SummonTimes', DAILY_FREE_SUMMON_ID),
+        )
+        return base_count + sum(
+            max(0, intv(value)) for static_id, value in bonuses
+            if has_active_status(login_data, static_id)
+        )
+    except sqlite3.Error:
+        return 1
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def claim_daily_free_summon(client, records, report):
     record = records.get(DAILY_FREE_SUMMON_ID)
     if not record:
         return
     buy_count = intv(record.get('BuyCount'))
+    free_limit = daily_free_summon_limit(client.login_data or {})
+    count = max(0, free_limit - buy_count)
     result = safe_call(
         client,
         report,
@@ -634,14 +664,14 @@ def claim_daily_free_summon(client, records, report):
                 '_id': oid(record.get('_id')),
                 'StaticID': DAILY_FREE_SUMMON_ID,
             },
-            'Count': 1,
+            'Count': count,
             'SelcetCostItemID': '',
         },
-        skip_if=buy_count >= 1,
+        skip_if=count <= 0,
         report_failure=True,
     )
     if result is not None:
-        record['BuyCount'] = buy_count + 1
+        record['BuyCount'] = buy_count + count
 
 
 def run_basic_daily(client, login_data, event, report):
