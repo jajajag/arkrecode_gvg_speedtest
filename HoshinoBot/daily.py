@@ -16,6 +16,10 @@ from .database import (
 HUNT_STATUS_ID = 'HuntActivity'
 HUNT_ELEMENTS = ('Fire', 'Ice', 'Earth', 'Light', 'Dark')
 HUNT_NAMES = dict(zip(HUNT_ELEMENTS, ('火', '水', '木', '光', '暗')))
+HUNT_ESSENCE_IDS = {
+    'Fire': 'CR15', 'Ice': 'CR35', 'Earth': 'CR25',
+    'Light': 'CR55', 'Dark': 'CR45',
+}
 DAILY_FREE_SUMMON_ID = 'NormalSummon'
 QUEST_BATCH_SIZE = 10
 SUPPORT_ITEM_IDS = ('CR14', 'CR24', 'CR34', 'CR44', 'CR54')
@@ -288,24 +292,35 @@ def has_active_status(login_data, static_id):
     return False
 
 
-def hunt_run_counts(config):
-    configured = config.get('DailyHuntRuns')
-    if not isinstance(configured, dict):
-        configured = {}
-    return {
-        element: max(intv(configured.get(element), 1), 0)
-        for element in HUNT_ELEMENTS
+def hunt_essence_counts(login_data):
+    items = {
+        item.get('StaticID'): intv(item.get('Count'))
+        for item in get_nested(login_data, 'ItemContainer', 'Items') or []
     }
+    return {element: items.get(static_id, 0)
+            for element, static_id in HUNT_ESSENCE_IDS.items()}
 
 
-def hunt_rotation(counts):
-    rounds = max(counts.values(), default=0)
-    return [
-        element
-        for index in range(rounds)
-        for element in HUNT_ELEMENTS
-        if counts[element] > index
-    ]
+def update_hunt_essence_counts(counts, result):
+    """Prefer reported inventory totals; otherwise add the received drops."""
+    item_elements = {sid: element for element, sid in HUNT_ESSENCE_IDS.items()}
+    gains = {}
+    reported = {}
+    for section in ('Drop', 'VirtualDrop', 'GuildDropResult'):
+        for entry in get_nested(result, section, 'Items') or []:
+            item = entry.get('Item') or {}
+            element = item_elements.get(item.get('StaticID'))
+            if element:
+                gains[element] = gains.get(element, 0) + intv(item.get('Count'))
+            now = entry.get('NowItem') or {}
+            element = item_elements.get(now.get('StaticID') or item.get('StaticID'))
+            if element and now.get('Count') is not None:
+                reported[element] = intv(now['Count'], counts[element])
+    for element in HUNT_ELEMENTS:
+        if element in reported:
+            counts[element] = reported[element]
+        elif element in gains:
+            counts[element] += gains[element]
 
 
 def pickup_from_login(login_data):
@@ -997,7 +1012,8 @@ def urgent_scene_ids(source):
     return scene_ids
 
 
-def run_urgent_missions(client, source, team, report, support=None, limit=20):
+def run_urgent_missions(client, source, team, report, support=None, limit=20,
+                        essence_counts=None):
     if not team:
         return
     pending = urgent_scene_ids(source)
@@ -1009,6 +1025,8 @@ def run_urgent_missions(client, source, team, report, support=None, limit=20):
         finished.add(scene_id)
         data = finish_scene(client, report, '紧急任务', scene_id, team,
                             support)
+        if essence_counts is not None:
+            update_hunt_essence_counts(essence_counts, data)
         for new_scene_id in urgent_scene_ids(data):
             if new_scene_id not in finished and new_scene_id not in pending:
                 pending.append(new_scene_id)
@@ -1055,15 +1073,11 @@ def run_hunts(client, login_data, team, report):
     if not team:
         report.warn('讨伐未执行：登录数据里没有可用队伍')
         return
-    counts = hunt_run_counts(client.config)
-    elements = hunt_rotation(counts)
-    if not elements:
-        report.warn('讨伐未执行：DailyHuntRuns 全部为 0')
-        return
-    run_urgent_missions(client, login_data, team, report)
+    counts = hunt_essence_counts(login_data)
+    run_urgent_missions(client, login_data, team, report, essence_counts=counts)
     index = 0
     while True:
-        element = elements[index % len(elements)]
+        element = min(HUNT_ELEMENTS, key=counts.get)
         _, scene_id = highest_passed_scene(
             login_data, r'Hunt{}_(\d+)'.format(element))
         if not scene_id:
@@ -1079,7 +1093,8 @@ def run_hunts(client, login_data, team, report):
         )
         if data is None:
             return
-        run_urgent_missions(client, data, team, report)
+        update_hunt_essence_counts(counts, data)
+        run_urgent_missions(client, data, team, report, essence_counts=counts)
         index += 1
 
 

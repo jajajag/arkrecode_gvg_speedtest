@@ -13,13 +13,6 @@
         "MinSubProps": {"SpeedValue": 2}
       }
     ],
-    "DailyHuntRuns": {
-      "Fire": 1,
-      "Ice": 1,
-      "Earth": 1,
-      "Light": 1,
-      "Dark": 1
-    },
     "ActivitySupportCUID": 119413335
   },
   "SubAccount": {
@@ -30,13 +23,6 @@
     "SecretShopDayRefreshLimit": 0,
     "RainbowShopDayRefreshLimit": 0,
     "ShopEquipmentTemplates": [],
-    "DailyHuntRuns": {
-      "Fire": 1,
-      "Ice": 1,
-      "Earth": 1,
-      "Light": 1,
-      "Dark": 1
-    },
     "ActivitySupportCUID": 119413335
   }
 }
