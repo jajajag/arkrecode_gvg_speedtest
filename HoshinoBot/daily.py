@@ -946,7 +946,7 @@ def run_npc_and_dispatch(client, login_data, team, report):
 
 
 def activity_support(client):
-    support_cuid = intv(client.config.get('ActivitySupportCUID'))
+    support_cuid = intv(client.config.get('SupportCUID', ''))
     if not support_cuid:
         return None
     return {
@@ -1201,7 +1201,7 @@ def vip_shop_refresh_limit(login_data, shop, report, db_path=MASTER_DB_PATH):
 
 def run_secret_shop(client, login_data, report, templates=None):
     if templates is None:
-        templates = client.config.get('ShopEquipmentTemplates', [])
+        templates = client.config.get('EquipTemplates', [])
     records = secret_records(login_data)
     account_save = login_data.setdefault('AccountSaveData', {})
     refreshes = max(0, intv(account_save.get(
@@ -1255,7 +1255,7 @@ def reserve_rainbowshop_refresh(client, limit, db_path=DATA_DB_PATH):
 
 def run_rainbowshop(client, report, templates=None):
     if templates is None:
-        templates = client.config.get('ShopEquipmentTemplates', [])
+        templates = client.config.get('EquipTemplates', [])
     if not templates:
         return
     refresh_limit = vip_shop_refresh_limit(
@@ -1311,7 +1311,7 @@ def run_daily_cleanup(client, login_data):
         run_hunts(client, login_data, team, report)
     else:
         run_activity(client, login_data, event, team, report)
-    templates = client.config.get('ShopEquipmentTemplates', [])
+    templates = client.config.get('EquipTemplates', [])
     run_secret_shop(client, login_data, report, templates)
     run_rainbowshop(client, report, templates)
     claim_battle_pass(client, login_data, report)

@@ -3,7 +3,7 @@
     "Token": "大号 refreshToken",
     "DeviceID": "大号 DeviceID",
     "GroupIDs": [],
-    "ShopEquipmentTemplates": [
+    "EquipTemplates": [
       {
         "Set": "Speed",
         "Part": "Necklace",
@@ -11,14 +11,14 @@
         "MinSubProps": {"SpeedValue": 2}
       }
     ],
-    "ActivitySupportCUID": 119413335
+    "SupportCUID": ""
   },
   "SubAccount": {
     "Token": "小号 refreshToken",
     "DeviceID": "小号 DeviceID",
     "GroupIDs": [],
     "TargetGuildID": "要查询交战对手的公会 GID",
-    "ShopEquipmentTemplates": [],
-    "ActivitySupportCUID": 119413335
+    "EquipTemplates": [],
+    "SupportCUID": ""
   }
 }
