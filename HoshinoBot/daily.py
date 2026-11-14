@@ -4,10 +4,10 @@ import math
 import re
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .api import GameRequestError, oid
+from .api import GameRequestError, get_game_client, oid
 from .database import (
     DATA_DB_PATH, MASTER_DB_PATH, connect_data, meta_get, meta_set, now_ms,
 )
@@ -1317,3 +1317,87 @@ def run_daily_cleanup(client, login_data):
     claim_battle_pass(client, login_data, report)
     claim_quest_rewards(client, login_data, event, report)
     return {'warnings': report.warnings}
+
+
+def pvp_reward_window(now):
+    now = now.astimezone(timezone.utc)
+    start = now.replace(hour=21, minute=1, second=0, microsecond=0)
+    if now.weekday() != 6 or now < start:
+        return None
+    return start, start.replace(hour=0, minute=0) + timedelta(days=1)
+
+
+def pvp_reward_status(result, week):
+    """Accept explicit flags for the target week from either response shape."""
+    pvp = result.get('PVPData') or {}
+    rows = [result.get('LastWeekInfo'), pvp.get('LastWeekInfo')]
+    rows.extend(pvp.get('Last4WeekInfoList') or [])
+    flags = [row['IsChoosedReward'] for row in rows
+             if isinstance(row, dict) and row.get('Week') == week
+             and isinstance(row.get('IsChoosedReward'), bool)]
+    if True in flags:
+        return True
+    return False if False in flags else None
+
+
+def claim_pvp_week_reward(account, deadline):
+    client = get_game_client(account=account)
+    with client.request_deadline(deadline.timestamp()):
+        # Reuse the shared session; leave failures to the next scheduled round.
+        data = client.call(
+            'PVPHandler.QueryPVPData', attempts=1, login_attempts=1)
+        rank = (data.get('PVPData') or {}).get('PVPRankInfo') or {}
+        week = rank.get('RankWeek')
+        info = rank.get('PVPInfo') or {}
+        if not isinstance(week, int) or info.get('NowWeek') != week:
+            raise GameRequestError('Arena week has not synchronized')
+        target = week - 1
+        if pvp_reward_status(data, target) is True:
+            return 'already claimed'
+        try:
+            result = client.call_once(
+                'PVPHandler.ChoosePVPWeekReward', {'ItemStaticID': '2'})
+        except Exception:
+            # Already-claimed responses can be plain text; a timeout can also
+            # follow a successful claim. Verify state instead of claiming again.
+            result = {}
+        if pvp_reward_status(result, target) is True:
+            return 'claimed diamonds'
+        data = client.call(
+            'PVPHandler.QueryPVPData', attempts=1, login_attempts=1)
+        if pvp_reward_status(data, target) is True:
+            return 'claim confirmed'
+        raise GameRequestError('Weekly reward is not confirmed claimed')
+
+
+def run_pvp_rewards(db_path=DATA_DB_PATH):
+    window = pvp_reward_window(datetime.now(timezone.utc))
+    if window is None:
+        return []
+    start, deadline = window
+    messages = []
+    conn = connect_data(db_path)
+    try:
+        for account in ('main', 'alt'):
+            now = datetime.now(timezone.utc)
+            if now >= deadline:
+                break
+            key = 'pvp_week_reward_' + account
+            state = json.loads(meta_get(conn, key) or '{}')
+            if state.get('window') != start.date().isoformat():
+                state = {'window': start.date().isoformat()}
+            if state.get('done'):
+                continue
+            state.pop('next_try', None)
+            try:
+                status = claim_pvp_week_reward(account, deadline)
+                state['done'] = True
+                messages.append('{}: {}'.format(account, status))
+            except Exception as exc:
+                messages.append(
+                    '{}: retry in 8 minutes: {}'.format(account, exc))
+            meta_set(conn, key, json.dumps(state))
+            conn.commit()
+    finally:
+        conn.close()
+    return messages

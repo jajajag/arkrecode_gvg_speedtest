@@ -31,7 +31,7 @@ from .database import (
     save_member_match,
     save_player_equipment,
 )
-from .daily import run_daily_cleanup
+from .daily import run_daily_cleanup, run_pvp_rewards
 from .master import update_master_db
 
 WORKFLOW_LOCK = threading.Lock()
@@ -528,6 +528,15 @@ def run_daily_sync():
                 status = '失败：{}'.format(exc)
             summaries.append('{}日常：{}'.format(label, status))
         return {'summary': '\n'.join(summaries)}
+    finally:
+        WORKFLOW_LOCK.release()
+
+
+def run_pvp_rewards_sync(db_path=DATA_DB_PATH):
+    if not WORKFLOW_LOCK.acquire(blocking=False):
+        return []
+    try:
+        return run_pvp_rewards(db_path)
     finally:
         WORKFLOW_LOCK.release()
 

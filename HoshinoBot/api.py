@@ -2,6 +2,7 @@ import json
 import random
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import requests
@@ -126,8 +127,29 @@ class GameClient:
         self.cuid = None
         self.login_data = None
         self._request_lock = threading.RLock()
+        self._request_deadline = None
+
+    @contextmanager
+    def request_deadline(self, timestamp):
+        """Temporarily bound requests, including automatic login retries."""
+        with self._request_lock:
+            previous = self._request_deadline
+            self._request_deadline = timestamp
+            try:
+                yield
+            finally:
+                self._request_deadline = previous
+
+    def _request_timeout(self, timeout=60):
+        if self._request_deadline is None:
+            return timeout
+        remaining = self._request_deadline - time.time()
+        if remaining <= 2:
+            raise GameRequestError('Request deadline reached')
+        return min(timeout, remaining - 1)
 
     def _post(self, url, payload=None, headers=None, timeout=60):
+        timeout = self._request_timeout(timeout)
         response = self.http.post(
             url,
             json=payload,
@@ -164,7 +186,8 @@ class GameClient:
         if not str(device_id or '').strip():
             raise ConfigError('新版 SDK 登录缺少 DeviceID，请填写获取 refreshToken 时的设备 ID')
 
-        bulletin = query_bulletin(self.http)
+        bulletin = query_bulletin(
+            self.http, timeout=self._request_timeout())
         info = bulletin.get('Info') or {}
         versions = info.get('AvailableVersions') or []
         if not versions:
@@ -209,6 +232,7 @@ class GameClient:
                 return None
             last_error = None
             for attempt in range(1, attempts + 1):
+                self._request_timeout()
                 try:
                     return self._login_once()
                 except Exception as exc:
@@ -221,29 +245,22 @@ class GameClient:
                 attempts, last_error)) from last_error
 
     def call(self, route, data=None, attempts=3, delay=None,
-             required_key=None):
+             required_key=None, login_attempts=3):
         with self._request_lock:
             last_error = None
             for attempt in range(1, attempts + 1):
+                self._request_timeout()
                 try:
                     if not self.session_id:
-                        self.login(attempts=3)
-                    payload = dict(data or {})
-                    payload.update({
-                        'AID': self.aid,
-                        'SessionID': self.session_id,
-                    })
-                    result = self._send_route(route, payload, delay=delay)
-                    if required_key and required_key not in result:
-                        raise GameRequestError(
-                            '{} 响应缺少 {}'.format(route, required_key))
-                    return result
+                        self.login(attempts=login_attempts)
+                    return self.call_once(
+                        route, data, delay=delay, required_key=required_key)
                 except Exception as exc:
                     last_error = exc
                     self.aid = self.session_id = self.cuid = None
                     self.login_data = None
                     if attempt < attempts:
-                        self.login(attempts=3)
+                        self.login(attempts=login_attempts)
             raise GameRequestError(
                 '{} 连续请求 {} 次失败：{}'.format(
                     route, attempts, last_error)
@@ -263,7 +280,7 @@ class GameClient:
             return result
 
 
-def query_bulletin(session=None):
+def query_bulletin(session=None, timeout=60):
     """Fetch public patch/version metadata without a game login."""
     owns_session = session is None
     http = session or requests.Session()
@@ -277,7 +294,7 @@ def query_bulletin(session=None):
             },
             headers=GAME_HEADERS,
             verify=False,
-            timeout=60,
+            timeout=timeout,
         )
         response.raise_for_status()
         response.encoding = 'utf-8'

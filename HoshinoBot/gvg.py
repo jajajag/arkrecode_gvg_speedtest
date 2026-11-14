@@ -19,6 +19,7 @@ from .queries import (
 from .updater import (
     daily_result_text,
     run_daily_sync,
+    run_pvp_rewards_sync,
     update_all_sync,
     update_result_text,
 )
@@ -158,6 +159,20 @@ def register_gvg(service):
     @service.scheduled_job('cron', hour=0, minute=1, timezone='UTC')
     async def gvg_daily_update():
         await run_update_job(service, run_daily=True)
+
+    @service.scheduled_job('cron', day_of_week='sun', hour='22',
+                           minute='5-59/8', timezone='UTC', max_instances=1,
+                           coalesce=True)
+    @service.scheduled_job('cron', day_of_week='sun', hour='21,23',
+                           minute='1-59/8', timezone='UTC', max_instances=1,
+                           coalesce=True)
+    async def pvp_week_reward():
+        try:
+            messages = await asyncio.to_thread(run_pvp_rewards_sync)
+            for message in messages:
+                service.logger.info('PVP weekly reward: {}'.format(message))
+        except Exception as exc:
+            service.logger.exception(exc)
 
     @service.on_prefix('团战')
     async def gvg_command(bot, ev):
