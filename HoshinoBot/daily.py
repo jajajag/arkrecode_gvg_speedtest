@@ -1170,6 +1170,35 @@ def buy_secret_records(client, records, report, templates=()):
     return True
 
 
+def vip_shop_refresh_limit(login_data, shop, report, db_path=MASTER_DB_PATH):
+    """Read the daily allowance for the account's current VIP level."""
+    columns = {
+        'SecretShop': 'DayRefreshStoreByDiamondCount',
+        'RainbowShop': 'CustomEquipRefreshTimes',
+    }
+    try:
+        level = int(get_nested(login_data, 'VIPInfo', 'LV'))
+        if not Path(db_path).is_file():
+            raise ValueError('master.db is missing')
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                'SELECT "{}" FROM VIP WHERE CAST(LV AS INTEGER) = ?'.format(
+                    columns[shop]), (level,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise ValueError('VIP level {} is missing from master.db'.format(level))
+        limit = int(row[0])
+        if limit < 0:
+            raise ValueError('negative refresh allowance')
+        return limit
+    except (TypeError, ValueError, sqlite3.Error) as exc:
+        report.fail('{} VIP refresh limit'.format(shop), exc)
+        return 0
+
+
 def run_secret_shop(client, login_data, report, templates=None):
     if templates is None:
         templates = client.config.get('ShopEquipmentTemplates', [])
@@ -1177,10 +1206,7 @@ def run_secret_shop(client, login_data, report, templates=None):
     account_save = login_data.setdefault('AccountSaveData', {})
     refreshes = max(0, intv(account_save.get(
         'RandomStoreDayRefreshCount')))
-    refresh_limit = max(0, intv(
-        client.config.get('SecretShopDayRefreshLimit',
-                          client.config.get('RandomStoreDayRefreshLimit'))
-    ))
+    refresh_limit = vip_shop_refresh_limit(login_data, 'SecretShop', report)
     while True:
         if not buy_secret_records(client, records, report, templates):
             return
@@ -1232,7 +1258,8 @@ def run_rainbowshop(client, report, templates=None):
         templates = client.config.get('ShopEquipmentTemplates', [])
     if not templates:
         return
-    refresh_limit = max(0, intv(client.config.get('RainbowShopDayRefreshLimit')))
+    refresh_limit = vip_shop_refresh_limit(
+        client.login_data, 'RainbowShop', report)
     payload = {'CommodityID': RAINBOW_SHOP_COMMODITY}
     data = safe_call(client, report, 'rainbowshop查询',
                      'CustomEquipHandler.Query', payload, report_failure=True)

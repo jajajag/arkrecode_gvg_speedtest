@@ -3,8 +3,6 @@
     "Token": "大号 refreshToken",
     "DeviceID": "大号 DeviceID",
     "GroupIDs": [],
-    "SecretShopDayRefreshLimit": 0,
-    "RainbowShopDayRefreshLimit": 0,
     "ShopEquipmentTemplates": [
       {
         "Set": "Speed",
@@ -20,8 +18,6 @@
     "DeviceID": "小号 DeviceID",
     "GroupIDs": [],
     "TargetGuildID": "要查询交战对手的公会 GID",
-    "SecretShopDayRefreshLimit": 0,
-    "RainbowShopDayRefreshLimit": 0,
     "ShopEquipmentTemplates": [],
     "ActivitySupportCUID": 119413335
   }
